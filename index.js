@@ -2,10 +2,10 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3002;
 
-// Başlangıç için sabit bir yönlendirme kuralı.
+// Kural defterimizi güncelliyoruz. Artık gerçek numaramızı tanıyor.
 const dialplan = {
-  '08501234567': [
-    { action: 'log', data: 'Gelen çağrı IVR uygulamasına yönlendiriliyor.' },
+  '902124548590': [
+    { action: 'log', data: 'Ana hat (902124548590) arandı. IVR uygulamasına yönlendiriliyor.' },
     { action: 'route', data: 'IVR_Giris' }
   ]
 };
@@ -17,10 +17,10 @@ app.get('/dialplan/:destination', (req, res) => {
   console.log(`[Dialplan Service] '${destination}' hedefi için yönlendirme planı sorgusu alındı.`);
 
   if (plan) {
-    console.log(`--> Yönlendirme planı bulundu. Plan gönderiliyor.`);
+    console.log(`--> ✅ Yönlendirme planı bulundu. Plan gönderiliyor.`);
     res.status(200).json(plan);
   } else {
-    console.log(`--> Yönlendirme planı bulunamadı. 404 Not Found yanıtı gönderiliyor.`);
+    console.log(`--> ❌ Yönlendirme planı bulunamadı. 404 Not Found yanıtı gönderiliyor.`);
     res.status(404).json({ error: 'Dialplan not found' });
   }
 });
