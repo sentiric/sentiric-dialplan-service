@@ -1,0 +1,14 @@
+{
+  "name": "sentiric-dialplan-service",
+  "version": "0.1.0",
+  "description": "Provides call routing decisions for the Sentiric platform.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "author": "Sentiric Team",
+  "license": "MIT"
+}
