@@ -1,0 +1,13 @@
+
+services:
+  dialplan-service:
+    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-dialplan-service:${TAG:-latest}
+    build: { context: . }
+    container_name: sentiric_dialplan_service
+    env_file: [./.env]
+    networks: [sentiric-net]
+    restart: unless-stopped
+networks:
+  sentiric-net:
+    name: ${NETWORK_NAME:-sentiric-net}
+    driver: bridge
