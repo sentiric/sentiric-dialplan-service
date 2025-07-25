@@ -1,7 +1,14 @@
-FROM node:18-alpine
+# --- AŞAMA 1: Derleme (Builder) ---
+FROM golang:1.22-alpine AS builder
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-EXPOSE 3002
-CMD [ "npm", "start" ]
+RUN CGO_ENABLED=0 GOOS=linux go build -o /dialplan-service .
+
+# --- AŞAMA 2: Çalıştırma (Runtime) ---
+FROM scratch
+WORKDIR /
+COPY --from=builder /dialplan-service .
+EXPOSE 50054
+ENTRYPOINT ["/dialplan-service"]
