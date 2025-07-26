@@ -6,10 +6,12 @@ import (
 	"log"
 	"net"
 	"os"
-	"regexp"
 
-	// Projemizin içine kopyaladığımız üretilmiş gRPC kodunu import ediyoruz
-	dialplanv1 "github.com/sentiric/sentiric-dialplan-service/gen/dialplan/v1"
+	// DEĞİŞİKLİK: Artık yerel 'gen' klasörü yerine Go modülü olarak indirilen
+	// merkezi kontrat reposundan import ediyoruz. Bu, projenin en önemli standardizasyon adımıdır.
+	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
+	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
+
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -17,31 +19,28 @@ import (
 // --- Veri Yapıları ve Mock Veritabanı ---
 
 // Gerçek bir veritabanı yerine geçecek olan hafızadaki yönlendirme kurallarımız
-var mockDialplan = map[string][]*dialplanv1.GetDialplanResponse_Action{
-	// Aranan numara "902124548590" ise bu kurallar çalışır
-	"902124548590": {
-		{
-			Type: dialplanv1.GetDialplanResponse_Action_ROUTE_TO_AGENT,
-			Parameters: map[string]string{
-				"initial_prompt": "Merhaba, Sentiric'e hoş geldiniz. Size nasıl yardımcı olabilirim?",
-			},
-		},
-	},
-	// Aranan numara "1001" (dahili bir operatör) ise bu kural çalışır
+var mockDialplan = map[string][]*dialplanv1.GetDialplanForUserResponse{
+	// "1001" user_id'si için bu kural çalışır
 	"1001": {
 		{
-			Type: dialplanv1.GetDialplanResponse_Action_ROUTE_TO_AGENT,
-			Parameters: map[string]string{
-				"target_agent_id": "op-alice-456",
+			DialplanId: "dp-internal-default",
+			Content:    "<extension name='internal'><condition><action application='bridge' data='user/1002'/></condition></extension>",
+			Owner: &userv1.User{
+				Id:    "1001",
+				Name:  "Alice",
+				Email: "alice@sentiric.com",
 			},
 		},
 	},
-	// Aranan numara "911" ise çağrıyı reddet
-	"911": {
+	// "902124548590" user_id'si için bu kural çalışır
+	"902124548590": {
 		{
-			Type: dialplanv1.GetDialplanResponse_Action_REJECT,
-			Parameters: map[string]string{
-				"reason": "Emergency services not supported",
+			DialplanId: "dp-main-ivr",
+			Content:    "<extension name='main_ivr'><condition><action application='answer'/><action application='playback' data='sounds/welcome.wav'/></condition></extension>",
+			Owner: &userv1.User{
+				Id:    "902124548590",
+				Name:  "Main IVR",
+				Email: "ivr@sentiric.com",
 			},
 		},
 	},
@@ -55,32 +54,24 @@ type server struct {
 	logger *zap.Logger
 }
 
-// GetDialplan RPC'sini implemente eden fonksiyon
-func (s *server) GetDialplan(ctx context.Context, req *dialplanv1.GetDialplanRequest) (*dialplanv1.GetDialplanResponse, error) {
-	// SIP URI'sinden aranan numarayı ayıklayalım
-	re := regexp.MustCompile(`sip:([^@;]+)`)
-	matches := re.FindStringSubmatch(req.GetToUri())
-
-	if len(matches) < 2 {
-		s.logger.Warn("Geçersiz To URI formatı", zap.String("uri", req.GetToUri()))
-		// Boş bir plan dönebiliriz, bu da arayan için "Not Found" anlamına gelir
-		return &dialplanv1.GetDialplanResponse{Actions: []*dialplanv1.GetDialplanResponse_Action{}}, nil
-	}
-	destination := matches[1]
-
-	s.logger.Info("GetDialplan isteği alındı",
-		zap.String("destination", destination),
-		zap.String("from", req.GetFromUri()),
+// GetDialplanForUser RPC'sini implemente eden fonksiyon
+func (s *server) GetDialplanForUser(ctx context.Context, req *dialplanv1.GetDialplanForUserRequest) (*dialplanv1.GetDialplanForUserResponse, error) {
+	userId := req.GetUserId()
+	s.logger.Info("GetDialplanForUser isteği alındı",
+		zap.String("user_id", userId),
 	)
 
 	// Mock dialplan'de hedefi ara
-	if actions, ok := mockDialplan[destination]; ok {
-		s.logger.Info("Yönlendirme planı bulundu", zap.Int("action_count", len(actions)))
-		return &dialplanv1.GetDialplanResponse{Actions: actions}, nil
+	// Not: Gerçekte, birden fazla plan olabilir, şimdilik ilkini döndürüyoruz.
+	if plans, ok := mockDialplan[userId]; ok && len(plans) > 0 {
+		s.logger.Info("Yönlendirme planı bulundu", zap.String("dialplan_id", plans[0].DialplanId))
+		return plans[0], nil
 	}
 
-	s.logger.Warn("Hedef için yönlendirme planı bulunamadı", zap.String("destination", destination))
-	return &dialplanv1.GetDialplanResponse{Actions: []*dialplanv1.GetDialplanResponse_Action{}}, nil
+	s.logger.Warn("Kullanıcı için yönlendirme planı bulunamadı", zap.String("user_id", userId))
+	// Hata yerine boş bir yanıt döndürmek, gRPC'de "Not Found" durumunu yönetmenin bir yoludur.
+	// İstemci, boş DialplanId'yi kontrol edebilir.
+	return &dialplanv1.GetDialplanForUserResponse{}, nil
 }
 
 // --- Ana Fonksiyon ---
