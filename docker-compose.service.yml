@@ -7,8 +7,15 @@ services:
     container_name: sentiric_dialplan_service
     env_file:
       - ./.env
-    # Dahili bir servis olduğu için dışarıya port açmaya gerek yok.
-    # Diğer konteynerler, docker ağı üzerinden servis adıyla erişir.
+    # YENİ EKLENEN BÖLÜMLER:
+    environment:
+      # Go kodumuz DATABASE_URL bekliyor, .env'deki POSTGRES_URL'i ona atıyoruz.
+      - DATABASE_URL=${POSTGRES_URL}
+      # Go kodumuz GRPC_PORT bekliyor, .env'deki GRPC_PORT_DIALPLAN'ı ona atıyoruz.
+      - GRPC_PORT=${GRPC_PORT_DIALPLAN}
+    # depends_on:
+    #   postgres:
+    #     condition: service_healthy
     networks:
       - sentiric-net
     restart: always
@@ -16,4 +23,4 @@ services:
 networks:
   sentiric-net:
     name: ${NETWORK_NAME:-sentiric-net}
-    driver: bridge    
+    driver: bridge

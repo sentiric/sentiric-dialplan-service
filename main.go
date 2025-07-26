@@ -2,87 +2,88 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"net"
 	"os"
 
-	// DEĞİŞİKLİK: Artık yerel 'gen' klasörü yerine Go modülü olarak indirilen
-	// merkezi kontrat reposundan import ediyoruz. Bu, projenin en önemli standardizasyon adımıdır.
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
-
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
-// --- Veri Yapıları ve Mock Veritabanı ---
-
-// Gerçek bir veritabanı yerine geçecek olan hafızadaki yönlendirme kurallarımız
-var mockDialplan = map[string][]*dialplanv1.GetDialplanForUserResponse{
-	// "1001" user_id'si için bu kural çalışır
-	"1001": {
-		{
-			DialplanId: "dp-internal-default",
-			Content:    "<extension name='internal'><condition><action application='bridge' data='user/1002'/></condition></extension>",
-			Owner: &userv1.User{
-				Id:    "1001",
-				Name:  "Alice",
-				Email: "alice@sentiric.com",
-			},
-		},
-	},
-	// "902124548590" user_id'si için bu kural çalışır
-	"902124548590": {
-		{
-			DialplanId: "dp-main-ivr",
-			Content:    "<extension name='main_ivr'><condition><action application='answer'/><action application='playback' data='sounds/welcome.wav'/></condition></extension>",
-			Owner: &userv1.User{
-				Id:    "902124548590",
-				Name:  "Main IVR",
-				Email: "ivr@sentiric.com",
-			},
-		},
-	},
-}
-
-// --- gRPC Sunucu Implementasyonu ---
-
-// dialplanv1.DialplanServiceServer arayüzünü implemente eden struct
+// server struct'ına bir veritabanı bağlantısı (DB pool) ekliyoruz.
 type server struct {
 	dialplanv1.UnimplementedDialplanServiceServer
-	logger *zap.Logger
+	db *sql.DB
 }
 
-// GetDialplanForUser RPC'sini implemente eden fonksiyon
+// GetDialplanForUser RPC'si artık mock veri yerine veritabanından okuma yapacak.
 func (s *server) GetDialplanForUser(ctx context.Context, req *dialplanv1.GetDialplanForUserRequest) (*dialplanv1.GetDialplanForUserResponse, error) {
 	userId := req.GetUserId()
-	s.logger.Info("GetDialplanForUser isteği alındı",
-		zap.String("user_id", userId),
+	log.Printf("GetDialplanForUser request received for user ID: %s", userId)
+
+	// Veritabanından dialplan'i ve ilişkili kullanıcıyı (owner) sorgula.
+	// Bir kullanıcının birden fazla dialplan'i olabilir, şimdilik ilk bulduğumuzu alıyoruz.
+	query := `
+		SELECT 
+			d.dialplan_id, d.content,
+			u.id, u.name, u.email, u.tenant_id
+		FROM dialplans d
+		JOIN users u ON d.user_id = u.id
+		WHERE d.user_id = $1
+		LIMIT 1
+	`
+	row := s.db.QueryRowContext(ctx, query, userId)
+
+	var response dialplanv1.GetDialplanForUserResponse
+	var owner userv1.User // owner bilgisini doldurmak için geçici bir struct
+
+	err := row.Scan(
+		&response.DialplanId, &response.Content,
+		&owner.Id, &owner.Name, &owner.Email, &owner.TenantId,
 	)
 
-	// Mock dialplan'de hedefi ara
-	// Not: Gerçekte, birden fazla plan olabilir, şimdilik ilkini döndürüyoruz.
-	if plans, ok := mockDialplan[userId]; ok && len(plans) > 0 {
-		s.logger.Info("Yönlendirme planı bulundu", zap.String("dialplan_id", plans[0].DialplanId))
-		return plans[0], nil
+	if err != nil {
+		if err == sql.ErrNoRows {
+			log.Printf("Dialplan not found for user ID: %s", userId)
+			return nil, status.Errorf(codes.NotFound, "dialplan for user ID '%s' not found", userId)
+		}
+		log.Printf("Database query failed: %v", err)
+		return nil, status.Errorf(codes.Internal, "database query failed: %v", err)
 	}
 
-	s.logger.Warn("Kullanıcı için yönlendirme planı bulunamadı", zap.String("user_id", userId))
-	// Hata yerine boş bir yanıt döndürmek, gRPC'de "Not Found" durumunu yönetmenin bir yoludur.
-	// İstemci, boş DialplanId'yi kontrol edebilir.
-	return &dialplanv1.GetDialplanForUserResponse{}, nil
+	response.Owner = &owner // owner bilgisini yanıta ekle
+	log.Printf("Dialplan found: %s for user %s", response.DialplanId, owner.Name)
+	return &response, nil
 }
 
-// --- Ana Fonksiyon ---
-
 func main() {
-	logger, err := zap.NewProduction()
-	if err != nil {
-		log.Fatalf("Logger oluşturulamadı: %v", err)
+	// Veritabanı bağlantı bilgisini ortam değişkeninden al.
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL environment variable is not set")
 	}
-	defer logger.Sync()
 
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("failed to ping database: %v", err)
+	}
+	log.Println("Successfully connected to the database")
+
+	// gRPC sunucusunu başlat
 	port := os.Getenv("GRPC_PORT")
 	if port == "" {
 		port = "50054"
@@ -91,14 +92,15 @@ func main() {
 
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		logger.Fatal("TCP dinleme başlatılamadı", zap.String("address", listenAddr), zap.Error(err))
+		log.Fatalf("failed to listen: %v", err)
 	}
 
 	s := grpc.NewServer()
-	dialplanv1.RegisterDialplanServiceServer(s, &server{logger: logger})
+	dialplanv1.RegisterDialplanServiceServer(s, &server{db: db})
+	reflection.Register(s)
 
-	logger.Info("gRPC sunucusu dinlemede", zap.String("address", listenAddr))
+	log.Printf("gRPC server listening at %v", lis.Addr())
 	if err := s.Serve(lis); err != nil {
-		logger.Fatal("Sunucu başlatılamadı", zap.Error(err))
+		log.Fatalf("failed to serve: %v", err)
 	}
 }
