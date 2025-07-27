@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"time" // Tekrar deneme mantığı için eklendi
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,21 +20,17 @@ import (
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 )
 
-// server struct'ına bir veritabanı bağlantısı (DB pool) ekliyoruz.
 type server struct {
 	dialplanv1.UnimplementedDialplanServiceServer
 	db *sql.DB
 }
 
-// GetDialplanForUser RPC'si artık mock veri yerine veritabanından okuma yapacak.
 func (s *server) GetDialplanForUser(ctx context.Context, req *dialplanv1.GetDialplanForUserRequest) (*dialplanv1.GetDialplanForUserResponse, error) {
 	userId := req.GetUserId()
 	log.Printf("GetDialplanForUser request received for user ID: %s", userId)
 
-	// Veritabanından dialplan'i ve ilişkili kullanıcıyı (owner) sorgula.
-	// Bir kullanıcının birden fazla dialplan'i olabilir, şimdilik ilk bulduğumuzu alıyoruz.
 	query := `
-		SELECT 
+		SELECT
 			d.dialplan_id, d.content,
 			u.id, u.name, u.email, u.tenant_id
 		FROM dialplans d
@@ -44,13 +41,12 @@ func (s *server) GetDialplanForUser(ctx context.Context, req *dialplanv1.GetDial
 	row := s.db.QueryRowContext(ctx, query, userId)
 
 	var response dialplanv1.GetDialplanForUserResponse
-	var owner userv1.User // owner bilgisini doldurmak için geçici bir struct
+	var owner userv1.User
 
 	err := row.Scan(
 		&response.DialplanId, &response.Content,
 		&owner.Id, &owner.Name, &owner.Email, &owner.TenantId,
 	)
-
 	if err != nil {
 		if err == sql.ErrNoRows {
 			log.Printf("Dialplan not found for user ID: %s", userId)
@@ -60,30 +56,38 @@ func (s *server) GetDialplanForUser(ctx context.Context, req *dialplanv1.GetDial
 		return nil, status.Errorf(codes.Internal, "database query failed: %v", err)
 	}
 
-	response.Owner = &owner // owner bilgisini yanıta ekle
+	response.Owner = &owner
 	log.Printf("Dialplan found: %s for user %s", response.DialplanId, owner.Name)
 	return &response, nil
 }
 
 func main() {
-	// Veritabanı bağlantı bilgisini ortam değişkeninden al.
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL environment variable is not set")
 	}
 
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+	var db *sql.DB
+	var err error
+
+	maxRetries := 5
+	for i := 0; i < maxRetries; i++ {
+		db, err = sql.Open("pgx", dbURL)
+		if err == nil {
+			err = db.Ping()
+			if err == nil {
+				log.Println("Successfully connected to the database")
+				break
+			}
+		}
+		if i == maxRetries-1 {
+			log.Fatalf("Failed to connect to database after %d attempts: %v", maxRetries, err)
+		}
+		log.Printf("Failed to connect to database (attempt %d/%d): %v. Retrying in 5 seconds...", i+1, maxRetries, err)
+		time.Sleep(5 * time.Second)
 	}
 	defer db.Close()
 
-	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to ping database: %v", err)
-	}
-	log.Println("Successfully connected to the database")
-
-	// gRPC sunucusunu başlat
 	port := os.Getenv("GRPC_PORT")
 	if port == "" {
 		port = "50054"
@@ -96,6 +100,7 @@ func main() {
 	}
 
 	s := grpc.NewServer()
+	// Bu satır, 'server' struct'ını ve metodlarını 'kullanılır' hale getirir.
 	dialplanv1.RegisterDialplanServiceServer(s, &server{db: db})
 	reflection.Register(s)
 
