@@ -1,7 +1,5 @@
-# Bu workflow'un adı
 name: Docker Image CI for Dialplan Service
 
-# Bu workflow ne zaman çalışacak?
 on:
   push:
     branches: [ "main" ]
@@ -9,67 +7,24 @@ on:
 
 jobs:
   build_and_push:
-    # İşlemin çalışacağı sanal sunucu
     runs-on: ubuntu-latest
-
-    # Bu işin, paketleri ghcr.io'ya yazma ve repoyu okuma izni olduğunu belirtiyoruz
     permissions:
       contents: read
       packages: write
-
     steps:
-      # --- Adım 1: Ana Servis Reposunu Klonla ---
-      - name: Checkout Dialplan Service Repo
+      - name: Check out the repo
         uses: actions/checkout@v4
-        with:
-          path: sentiric-dialplan-service # Klonlanacağı klasörün adını belirtiyoruz
-
-      # --- Adım 2: Bağımlı Olan Interfaces Reposunu Klonla ---
-      - name: Checkout Core Interfaces Repo
-        uses: actions/checkout@v4
-        with:
-          repository: sentiric/sentiric-core-interfaces
-          path: sentiric-core-interfaces # Ana servisin yanına klonla
-
-      # --- Adım 3: gRPC Kodunu Üret ve Kopyala ---
-      - name: Generate and Copy gRPC Stubs for Go
-        run: |
-          # Gerekli Go gRPC araçlarını kur
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-          
-          # protoc'un PATH'e eklenmesi gerekebilir, bu yüzden tam yolunu kullanalım
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          
-          echo "Generating gRPC code from .proto files..."
-          # Makefile'ı çalıştırmak yerine doğrudan protoc komutunu kullanmak daha güvenilir
-          protoc --proto_path=sentiric-core-interfaces/proto \
-                 --go_out=./sentiric-dialplan-service/gen --go_opt=paths=source_relative \
-                 --go-grpc_out=./sentiric-dialplan-service/gen --go-grpc_opt=paths=source_relative \
-                 sentiric-core-interfaces/proto/sentiric/dialplan/v1/dialplan.proto
-
-          echo "Generated code copied successfully."
-          ls -R sentiric-dialplan-service/gen
-
-      # --- Adım 4: Docker Kurulumu ve Giriş ---
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- Adım 5: Docker İmajını Oluştur ve Yayınla ---
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          # context'i, Dockerfile'ın bulunduğu ve artık 'gen' klasörünü de içeren
-          # klasör olarak belirtiyoruz
-          context: ./sentiric-dialplan-service 
+          context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
