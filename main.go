@@ -104,7 +104,7 @@ func main() {
 	dialplanv1.RegisterDialplanServiceServer(s, &server{db: db})
 	reflection.Register(s)
 
-	log.Printf("gRPC server listening at %v", lis.Addr())
+	log.Printf("gRPC dialplan-service listening at %v", lis.Addr())
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
