@@ -6,7 +6,7 @@ toolchain go1.24.5
 
 require (
 	// YENİ: Merkezi kontratlarımızı bir bağımlılık olarak ekliyoruz.
-	github.com/sentiric/sentiric-contracts v0.4.2
+	github.com/sentiric/sentiric-contracts v1.2.0
 	google.golang.org/grpc v1.65.0
 	google.golang.org/protobuf v1.34.2 // indirect
 )
