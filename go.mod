@@ -6,12 +6,15 @@ toolchain go1.24.5
 
 require (
 	// YENİ: Merkezi kontratlarımızı bir bağımlılık olarak ekliyoruz.
-	github.com/sentiric/sentiric-contracts v1.2.0
+	github.com/sentiric/sentiric-contracts v1.3.0
 	google.golang.org/grpc v1.65.0
 	google.golang.org/protobuf v1.34.2 // indirect
 )
 
-require github.com/jackc/pgx/v5 v5.7.5
+require (
+	github.com/jackc/pgx/v5 v5.7.5
+	github.com/joho/godotenv v1.5.1
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

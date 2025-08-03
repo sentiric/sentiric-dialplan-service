@@ -1,26 +1,51 @@
-services:
-  dialplan-service:
-    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-dialplan-service:${TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: sentiric_dialplan_service
-    env_file:
-      - ./.env
-    # YENİ EKLENEN BÖLÜMLER:
-    environment:
-      # Go kodumuz DATABASE_URL bekliyor, .env'deki POSTGRES_URL'i ona atıyoruz.
-      - DATABASE_URL=${POSTGRES_URL}
-      # Go kodumuz GRPC_PORT bekliyor, .env'deki GRPC_PORT_DIALPLAN'ı ona atıyoruz.
-      - GRPC_PORT=${GRPC_PORT_DIALPLAN}
-    # depends_on:
-    #   postgres:
-    #     condition: service_healthy
-    networks:
-      - sentiric-net
-    restart: always
-
 networks:
   sentiric-net:
     name: ${NETWORK_NAME:-sentiric-net}
     driver: bridge
+
+volumes:
+  postgres_data:
+
+services:
+  # VERİ KATMANI
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - ./.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../sentiric-infrastructure/postgres-init:/docker-entrypoint-initdb.d
+    # ports:
+    #   - "${POSTGRES_DB_PORT}:${POSTGRES_DB_PORT}"
+    networks:
+      - sentiric-net
+    profiles:
+      - default
+      - data
+    restart: always
+
+  dialplan-service:
+
+    build:
+      context: .
+      dockerfile: Dockerfile          
+      args:
+        SERVICE_NAME: sentiric-dialplan-service
+
+    env_file: 
+      - ./.env 
+    
+    volumes:
+      - ../sentiric-infrastructure/tls/certs:/etc/sentiric/tls:ro
+
+    # ports:
+    #   - "${DIALPLAN_SERVICE_GRPC_PORT}:${DIALPLAN_SERVICE_GRPC_PORT}"
+
+    networks:
+      - sentiric-net
+    
+    profiles:
+      - default
+      - app
+
+    restart: always  
