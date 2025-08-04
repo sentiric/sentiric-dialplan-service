@@ -8,13 +8,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"time"
 
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger" // YENİ
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
+	"github.com/rs/zerolog" // YENİ
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 	"google.golang.org/grpc"
@@ -24,15 +26,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Sabitler ve Global Değişkenler
+const serviceName = "dialplan-service"
+
+var log zerolog.Logger
+
 type server struct {
 	dialplanv1.UnimplementedDialplanServiceServer
 	db *sql.DB
 }
 
 func main() {
-	log.Println("Dialplan Service başlatılıyor...")
+	godotenv.Load()
+	log = logger.New(serviceName)
 
-	_ = godotenv.Load() // .env yüklense veya yüklenmese, Docker’dan gelen env’lere odak
+	log.Info().Msg("Dialplan Service başlatılıyor...")
 
 	db := connectToDBWithRetry(getEnvOrFail("POSTGRES_URL"), 10)
 	defer db.Close()
@@ -41,7 +49,7 @@ func main() {
 	listenAddr := fmt.Sprintf(":%s", port)
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		log.Fatalf("TCP port dinlenemedi: %v", err)
+		log.Fatal().Err(err).Msg("TCP port dinlenemedi")
 	}
 
 	creds := loadServerTLS(
@@ -54,44 +62,46 @@ func main() {
 	dialplanv1.RegisterDialplanServiceServer(s, &server{db: db})
 	reflection.Register(s)
 
-	log.Printf("gRPC Dialplan Service %s portunda dinleniyor...", listenAddr)
+	log.Info().Str("port", port).Msg("gRPC sunucusu dinleniyor...")
 	if err := s.Serve(lis); err != nil {
-		log.Fatalf("gRPC sunucusu başlatılamadı: %v", err)
+		log.Fatal().Err(err).Msg("gRPC sunucusu başlatılamadı")
 	}
 }
 
-// ========================
-// === DB ve TLS Setup ===
-// ========================
+// ... (Database ve TLS fonksiyonları aynı, sadece loglama çağrıları güncellendi) ...
 
 func connectToDBWithRetry(dsn string, maxRetries int) *sql.DB {
 	var db *sql.DB
 	var err error
 	for i := 1; i <= maxRetries; i++ {
 		db, err = sql.Open("pgx", dsn)
-		if err == nil && db.Ping() == nil {
-			log.Println("Veritabanı bağlantısı başarılı.")
-			return db
+		if err == nil {
+			if pingErr := db.Ping(); pingErr == nil {
+				log.Info().Msg("Veritabanı bağlantısı başarılı.")
+				return db
+			} else {
+				err = pingErr
+			}
 		}
-		log.Printf("Veritabanına bağlanılamadı (deneme %d/%d): %v", i, maxRetries, err)
+		log.Warn().Err(err).Int("attempt", i).Int("max_attempts", maxRetries).Msg("Veritabanına bağlanılamadı, 5 saniye sonra tekrar denenecek...")
 		time.Sleep(5 * time.Second)
 	}
-	log.Fatalf("Veritabanına bağlanılamadı: %v", err)
+	log.Fatal().Err(err).Msg("Veritabanına bağlanılamadı")
 	return nil
 }
 
 func loadServerTLS(certPath, keyPath, caPath string) credentials.TransportCredentials {
 	serverCert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		log.Fatalf("Sertifika yüklenemedi: %v", err)
+		log.Fatal().Err(err).Msg("Sertifika yüklenemedi")
 	}
 	caPEM, err := ioutil.ReadFile(caPath)
 	if err != nil {
-		log.Fatalf("CA sertifikası okunamadı: %v", err)
+		log.Fatal().Err(err).Msg("CA sertifikası okunamadı")
 	}
 	caPool := x509.NewCertPool()
 	if !caPool.AppendCertsFromPEM(caPEM) {
-		log.Fatal("CA sertifikası geçersiz.")
+		log.Fatal().Msg("CA sertifikası geçersiz.")
 	}
 	return credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{serverCert},
@@ -100,12 +110,9 @@ func loadServerTLS(certPath, keyPath, caPath string) credentials.TransportCreden
 	})
 }
 
-// ============================================================
-// === gRPC servis metodları — ResolveDialplan & helper =======
-// ============================================================
-
 func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
-	log.Printf("ResolveDialplan çağrıldı: caller=%s, dest=%s", req.CallerId, req.DestinationNumber)
+	l := log.With().Str("method", "ResolveDialplan").Str("caller_id", req.CallerId).Str("destination", req.DestinationNumber).Logger()
+	l.Info().Msg("İstek alındı")
 
 	var tenantID, activeDP, failsafeDP sql.NullString
 	var maintenance sql.NullBool
@@ -113,15 +120,18 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 		`SELECT tenant_id, active_dialplan_id, failsafe_dialplan_id, is_maintenance_mode
 		 FROM inbound_routes WHERE phone_number = $1`, req.DestinationNumber).
 		Scan(&tenantID, &activeDP, &failsafeDP, &maintenance)
+
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("Destination bulunamadı, fallback dialplan DP_SYSTEM_FAILSAFE kullanılacak.")
+			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
 			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil)
 		}
+		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
 	if maintenance.Valid && maintenance.Bool {
+		l.Info().Str("failsafe_dialplan", failsafeDP.String).Msg("Sistem bakım modunda, failsafe planına yönlendiriliyor.")
 		return s.getDialplanByID(ctx, failsafeDP.String, nil)
 	}
 
@@ -134,20 +144,24 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("Caller kullanıcı değil → guest dialplan.")
+			l.Info().Msg("Arayan kullanıcı veritabanında bulunamadı, misafir (guest) planına yönlendiriliyor.")
 			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil)
 		}
+		l.Error().Err(err).Msg("Kullanıcı sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "User sorgusu başarısız: %v", err)
 	}
 
 	if name.Valid {
 		user.Name = name.String
 	}
+	l.Info().Str("active_dialplan", activeDP.String).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
 	return s.getDialplanByID(ctx, activeDP.String, &user)
 }
 
 func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User) (*dialplanv1.ResolveDialplanResponse, error) {
-	log.Printf("Dialplan detayları alınıyor: %s", id)
+	l := log.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Logger()
+	l.Info().Msg("Dialplan detayları alınıyor")
+
 	var description, action, tenantID sql.NullString
 	var actionBytes []byte
 
@@ -156,19 +170,21 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 		Scan(&description, &action, &actionBytes, &tenantID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("Dialplan ID %s bulunamadı → fallback sistem dialplan.", id)
+			l.Error().Msg("Dialplan ID bulunamadı, sistem failsafe planına yönlendiriliyor.")
 			if id == "DP_SYSTEM_FAILSAFE" {
+				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan (DP_SYSTEM_FAILSAFE) dahi bulunamadı!")
 				return nil, status.Error(codes.Internal, "Sistem dialplan eksik: DP_SYSTEM_FAILSAFE.")
 			}
 			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user)
 		}
+		l.Error().Err(err).Msg("Dialplan sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Dialplan sorgusu başarısız: %v", err)
 	}
 
 	dataMap := map[string]string{}
 	if actionBytes != nil {
 		if err := json.Unmarshal(actionBytes, &dataMap); err != nil {
-			log.Printf("WARN: action_data JSON parse hatalı: %v", err)
+			l.Warn().Err(err).Msg("action_data JSON parse edilemedi")
 		}
 	}
 
@@ -184,13 +200,10 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 		resp.MatchedUser = user
 	}
 
-	log.Printf("Dialplan çözümlendi: id=%s action=%s", resp.DialplanId, resp.Action.Action)
+	l.Info().Str("action", resp.Action.Action).Msg("Dialplan başarıyla çözümlendi")
 	return resp, nil
 }
 
-// =============================
-// === Yardımcı Fonksiyonlar ===
-// =============================
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -201,6 +214,6 @@ func getEnvOrFail(key string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	log.Fatalf("Ortam değişkeni yok: %s", key)
+	log.Fatal().Str("variable", key).Msg("Gerekli ortam değişkeni tanımlı değil")
 	return ""
 }
