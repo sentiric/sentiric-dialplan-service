@@ -14,7 +14,7 @@ services:
       - ./.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../sentiric-infrastructure/postgres-init:/docker-entrypoint-initdb.d
+      - ../sentiric-config/postgres-init:/docker-entrypoint-initdb.d
     # ports:
     #   - "${POSTGRES_DB_PORT}:${POSTGRES_DB_PORT}"
     networks:
@@ -42,7 +42,7 @@ services:
       - ./.env 
     
     volumes:
-      - ../sentiric-infrastructure/tls/certs:/etc/sentiric/tls:ro
+      - ../sentiric-config/tls/certs:/etc/sentiric/tls:ro
 
     # ports:
     #   - "${DIALPLAN_SERVICE_GRPC_PORT}:${DIALPLAN_SERVICE_GRPC_PORT}"
