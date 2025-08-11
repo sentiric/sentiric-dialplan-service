@@ -1,3 +1,4 @@
+// ========== FILE: sentiric-dialplan-service/main.go ==========
 package main
 
 import (
@@ -12,38 +13,78 @@ import (
 	"os"
 	"time"
 
-	"github.com/sentiric/sentiric-dialplan-service/internal/logger" // YENİ
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
-	"github.com/rs/zerolog" // YENİ
+	"github.com/rs/zerolog"
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 )
 
-// Sabitler ve Global Değişkenler
 const serviceName = "dialplan-service"
 
 var log zerolog.Logger
 
+// YENİ: Artık user-service'e bir istemci bağlantısı da tutacak.
 type server struct {
 	dialplanv1.UnimplementedDialplanServiceServer
-	db *sql.DB
+	db         *sql.DB
+	userClient userv1.UserServiceClient
+}
+
+// YENİ: gRPC istemcisi oluşturmak için yardımcı fonksiyon
+func createUserServiceClient() userv1.UserServiceClient {
+	userServiceURL := getEnvOrFail("USER_SERVICE_GRPC_URL")
+	certPath := getEnvOrFail("DIALPLAN_SERVICE_CERT_PATH")
+	keyPath := getEnvOrFail("DIALPLAN_SERVICE_KEY_PATH")
+	caPath := getEnvOrFail("GRPC_TLS_CA_PATH")
+
+	clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("İstemci sertifikası yüklenemedi")
+	}
+
+	caCert, err := os.ReadFile(caPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("CA sertifikası okunamadı")
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		log.Fatal().Msg("CA sertifikası havuza eklenemedi")
+	}
+
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		ServerName:   "user-service", // Sertifikanın CN/SAN alanıyla eşleşmeli
+	})
+
+	conn, err := grpc.NewClient(userServiceURL, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		log.Fatal().Err(err).Msg("User Service'e gRPC bağlantısı kurulamadı")
+	}
+
+	log.Info().Str("url", userServiceURL).Msg("User Service'e gRPC istemci bağlantısı başarılı")
+	return userv1.NewUserServiceClient(conn)
 }
 
 func main() {
 	godotenv.Load()
 	log = logger.New(serviceName)
-
 	log.Info().Msg("Dialplan Service başlatılıyor...")
 
 	db := connectToDBWithRetry(getEnvOrFail("POSTGRES_URL"), 10)
 	defer db.Close()
+
+	userClient := createUserServiceClient()
 
 	port := getEnv("DIALPLAN_SERVICE_GRPC_PORT", "50054")
 	listenAddr := fmt.Sprintf(":%s", port)
@@ -59,7 +100,7 @@ func main() {
 	)
 
 	s := grpc.NewServer(grpc.Creds(creds))
-	dialplanv1.RegisterDialplanServiceServer(s, &server{db: db})
+	dialplanv1.RegisterDialplanServiceServer(s, &server{db: db, userClient: userClient})
 	reflection.Register(s)
 
 	log.Info().Str("port", port).Msg("gRPC sunucusu dinleniyor...")
@@ -68,8 +109,116 @@ func main() {
 	}
 }
 
-// ... (Database ve TLS fonksiyonları aynı, sadece loglama çağrıları güncellendi) ...
+func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	traceID := "unknown"
+	if vals := md.Get("x-trace-id"); len(vals) > 0 {
+		traceID = vals[0]
+	}
+	l := log.With().Str("method", "ResolveDialplan").Str("caller", req.GetCallerContactValue()).Str("destination", req.GetDestinationNumber()).Str("trace_id", traceID).Logger()
+	l.Info().Msg("İstek alındı")
 
+	// Adım 1: Gelen numara için bir rota var mı diye kontrol et
+	var tenantID, activeDP, failsafeDP sql.NullString
+	var maintenance sql.NullBool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT tenant_id, active_dialplan_id, failsafe_dialplan_id, is_maintenance_mode
+		 FROM inbound_routes WHERE phone_number = $1`, req.GetDestinationNumber()).
+		Scan(&tenantID, &activeDP, &failsafeDP, &maintenance)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, traceID)
+		}
+		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
+		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
+	}
+
+	if maintenance.Valid && maintenance.Bool {
+		l.Info().Str("failsafe_dialplan", failsafeDP.String).Msg("Sistem bakım modunda, failsafe planına yönlendiriliyor.")
+		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil, traceID)
+	}
+
+	// Adım 2: User Service'e arayanın kim olduğunu sor
+	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
+	userRes, err := s.userClient.FindUserByContact(userReqCtx, &userv1.FindUserByContactRequest{
+		ContactType:  "phone",
+		ContactValue: req.GetCallerContactValue(),
+	})
+
+	if err != nil {
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
+			l.Info().Msg("Arayan kullanıcı User Service'de bulunamadı, misafir (guest) planına yönlendiriliyor.")
+			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil, nil, traceID)
+		}
+
+		l.Error().Err(err).Msg("User Service'e yapılan FindUserByContact çağrısı başarısız")
+		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil, traceID) // Hata durumunda failsafe'e git
+	}
+
+	// Kullanıcıyı ve aradığı contact'ı bulduk
+	matchedUser := userRes.GetUser()
+	var matchedContact *userv1.Contact
+	for _, c := range matchedUser.Contacts {
+		if c.ContactValue == req.GetCallerContactValue() {
+			matchedContact = c
+			break
+		}
+	}
+
+	l.Info().Str("active_dialplan", activeDP.String).Str("user_id", matchedUser.Id).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
+	return s.getDialplanByID(ctx, activeDP.String, matchedUser, matchedContact, traceID)
+}
+
+func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact, traceID string) (*dialplanv1.ResolveDialplanResponse, error) {
+	l := log.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Str("trace_id", traceID).Logger()
+	l.Info().Msg("Dialplan detayları alınıyor")
+
+	var description, action, tenantID sql.NullString
+	var actionBytes []byte
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT description, action, action_data, tenant_id FROM dialplans WHERE id = $1`, id).
+		Scan(&description, &action, &actionBytes, &tenantID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			l.Error().Msg("Dialplan ID bulunamadı, sistem failsafe planına yönlendiriliyor.")
+			if id == "DP_SYSTEM_FAILSAFE" {
+				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan (DP_SYSTEM_FAILSAFE) dahi bulunamadı!")
+				return nil, status.Error(codes.Internal, "Sistem dialplan eksik: DP_SYSTEM_FAILSAFE.")
+			}
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user, contact, traceID)
+		}
+		l.Error().Err(err).Msg("Dialplan sorgusu başarısız")
+		return nil, status.Errorf(codes.Internal, "Dialplan sorgusu başarısız: %v", err)
+	}
+
+	var dataMap map[string]string
+	if actionBytes != nil {
+		if err := json.Unmarshal(actionBytes, &dataMap); err != nil {
+			l.Warn().Err(err).Msg("action_data JSON parse edilemedi")
+			dataMap = make(map[string]string) // Hata durumunda boş harita ata
+		}
+	}
+
+	resp := &dialplanv1.ResolveDialplanResponse{
+		DialplanId: id,
+		TenantId:   tenantID.String,
+		Action: &dialplanv1.DialplanAction{
+			Action:     action.String,
+			ActionData: &dialplanv1.ActionData{Data: dataMap},
+		},
+		MatchedUser:    user,
+		MatchedContact: contact,
+	}
+
+	l.Info().Str("action", resp.Action.Action).Msg("Dialplan başarıyla çözümlendi")
+	return resp, nil
+}
+
+// --- Değişiklik Gerektirmeyen Fonksiyonlar ---
 func connectToDBWithRetry(dsn string, maxRetries int) *sql.DB {
 	var db *sql.DB
 	var err error
@@ -108,100 +257,6 @@ func loadServerTLS(certPath, keyPath, caPath string) credentials.TransportCreden
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    caPool,
 	})
-}
-
-func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
-	l := log.With().Str("method", "ResolveDialplan").Str("caller_id", req.CallerId).Str("destination", req.DestinationNumber).Logger()
-	l.Info().Msg("İstek alındı")
-
-	var tenantID, activeDP, failsafeDP sql.NullString
-	var maintenance sql.NullBool
-	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id, active_dialplan_id, failsafe_dialplan_id, is_maintenance_mode
-		 FROM inbound_routes WHERE phone_number = $1`, req.DestinationNumber).
-		Scan(&tenantID, &activeDP, &failsafeDP, &maintenance)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil)
-		}
-		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
-		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
-	}
-
-	if maintenance.Valid && maintenance.Bool {
-		l.Info().Str("failsafe_dialplan", failsafeDP.String).Msg("Sistem bakım modunda, failsafe planına yönlendiriliyor.")
-		return s.getDialplanByID(ctx, failsafeDP.String, nil)
-	}
-
-	var user userv1.User
-	var name sql.NullString
-	err = s.db.QueryRowContext(ctx,
-		`SELECT id, name, tenant_id, user_type FROM users WHERE id = $1 AND tenant_id = $2`,
-		req.CallerId, tenantID.String).
-		Scan(&user.Id, &name, &user.TenantId, &user.UserType)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			l.Info().Msg("Arayan kullanıcı veritabanında bulunamadı, misafir (guest) planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil)
-		}
-		l.Error().Err(err).Msg("Kullanıcı sorgusu başarısız")
-		return nil, status.Errorf(codes.Internal, "User sorgusu başarısız: %v", err)
-	}
-
-	if name.Valid {
-		user.Name = name.String
-	}
-	l.Info().Str("active_dialplan", activeDP.String).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
-	return s.getDialplanByID(ctx, activeDP.String, &user)
-}
-
-func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User) (*dialplanv1.ResolveDialplanResponse, error) {
-	l := log.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Logger()
-	l.Info().Msg("Dialplan detayları alınıyor")
-
-	var description, action, tenantID sql.NullString
-	var actionBytes []byte
-
-	err := s.db.QueryRowContext(ctx,
-		`SELECT description, action, action_data, tenant_id FROM dialplans WHERE id = $1`, id).
-		Scan(&description, &action, &actionBytes, &tenantID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			l.Error().Msg("Dialplan ID bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			if id == "DP_SYSTEM_FAILSAFE" {
-				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan (DP_SYSTEM_FAILSAFE) dahi bulunamadı!")
-				return nil, status.Error(codes.Internal, "Sistem dialplan eksik: DP_SYSTEM_FAILSAFE.")
-			}
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user)
-		}
-		l.Error().Err(err).Msg("Dialplan sorgusu başarısız")
-		return nil, status.Errorf(codes.Internal, "Dialplan sorgusu başarısız: %v", err)
-	}
-
-	dataMap := map[string]string{}
-	if actionBytes != nil {
-		if err := json.Unmarshal(actionBytes, &dataMap); err != nil {
-			l.Warn().Err(err).Msg("action_data JSON parse edilemedi")
-		}
-	}
-
-	resp := &dialplanv1.ResolveDialplanResponse{
-		DialplanId: id,
-		TenantId:   tenantID.String,
-		Action: &dialplanv1.DialplanAction{
-			Action:     action.String,
-			ActionData: &dialplanv1.ActionData{Data: dataMap},
-		},
-	}
-	if user != nil {
-		resp.MatchedUser = user
-	}
-
-	l.Info().Str("action", resp.Action.Action).Msg("Dialplan başarıyla çözümlendi")
-	return resp, nil
 }
 
 func getEnv(key, fallback string) string {
