@@ -27,6 +27,4 @@ ARG SERVICE_NAME
 WORKDIR /app
 COPY --from=builder /app/${SERVICE_NAME} .
 
-COPY --from=builder /app/${SERVICE_NAME} /app/main
-
-ENTRYPOINT ["/app/main"]
+ENTRYPOINT ["./sentiric-dialplan-service"]
