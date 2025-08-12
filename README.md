@@ -1,69 +1,47 @@
 # 🗺️ Sentiric Dialplan Service
 
-**Description:** This service provides dynamic call routing decisions for the Sentiric platform. Built with **Go** for simplicity and performance, it acts as a central rule engine that determines the initial actions for an incoming call.
+[![Status](https://img.shields.io/badge/status-active-success.svg)]()
+[![Language](https://img.shields.io/badge/language-Go-blue.svg)]()
+[![Protocol](https://img.shields.io/badge/protocol-gRPC_(mTLS)-green.svg)]()
 
-**Core Responsibilities:**
-*   **Routing Logic:** Exposes a gRPC endpoint (`GetDialplan`) that evaluates an incoming call's destination (`to_uri`) and source (`from_uri`).
-*   **Action Definition:** Returns a sequence of actions to be executed by the calling service (e.g., `ROUTE_TO_AGENT`, `REJECT`). This decouples the "decision" from the "execution".
-*   **Persistent Rule Storage (Future):** While the initial version uses an in-memory map for rules, its core responsibility is to manage and query a persistent database (like PostgreSQL) for these rules.
-*   **Management API (Future):** Will provide gRPC endpoints for CRUD (Create, Read, Update, Delete) operations on dialplan rules, to be used by the `sentiric-dashboard-ui`.
+**Sentiric Dialplan Service**, Sentiric platformu için dinamik çağrı yönlendirme kararları veren **stratejik karar merkezidir.** Yüksek performans ve basitlik için **Go** ile yazılmıştır. Gelen bir çağrının, o anki koşullara göre hangi iş akışını tetiklemesi gerektiğini belirleyen merkezi bir kural motoru (rule engine) olarak görev yapar.
 
-**Technology Stack:**
-*   **Language:** Go
-*   **Inter-Service Communication:**
-    *   **gRPC:** Exposes a `DialplanService` for synchronous, type-safe queries from other backend services.
-*   **Containerization:** Docker (Multi-stage builds for minimal, static Go binary).
+## 🎯 Temel Sorumluluklar
 
-**API Interactions (Server For):**
-*   **`sentiric-sip-signaling-service` (gRPC):** This service calls the `GetDialplan` RPC to determine what to do with a newly received call.
-*   **`sentiric-api-gateway-service` (Future gRPC):** Will call this service to manage dialplan rules from the admin dashboard.
+*   **Dinamik Yönlendirme Mantığı:** Gelen bir çağrının hedef numarasına (`destination_number`) göre veritabanındaki `inbound_routes` tablosunu sorgular.
+*   **Kullanıcı Tanıma:** Arayan numarayı (`caller_contact_value`) kullanarak `user-service`'e danışır ve arayanın kim olduğunu tespit eder.
+*   **Koşullu Karar Verme:**
+    *   Eğer aranan numara bakım modundaysa, **bakım anonsu** planını döndürür.
+    *   Eğer arayan kişi sistemde kayıtlı değilse, **misafir karşılama** (`PROCESS_GUEST_CALL`) planını döndürür.
+    *   Eğer arayan kayıtlı bir kullanıcı ise, o numaraya atanmış olan **aktif iş akışı** planını (`START_AI_CONVERSATION` vb.) döndürür.
+*   **gRPC Arayüzü:** `ResolveDialplan` adında tek bir gRPC endpoint'i sunarak, `sip-signaling-service` gibi servislerin senkron ve tip-güvenli bir şekilde yönlendirme kararı almasını sağlar.
 
-## Getting Started
+## 🛠️ Teknoloji Yığını
 
-### Prerequisites
-- Go (version 1.22 or later)
-- Docker and Docker Compose
-- Git
-- All Sentiric repositories cloned into a single workspace directory.
+*   **Dil:** Go
+*   **Servisler Arası İletişim:** gRPC (mTLS ile güvenli hale getirilmiş)
+*   **Veritabanı Erişimi:** PostgreSQL (`pgx` kütüphanesi)
+*   **Loglama:** `zerolog` ile yapılandırılmış, ortama duyarlı loglama.
 
-### Local Development & Platform Setup
-This service is not designed to run standalone. It is an integral part of the Sentiric platform and must be run via the central orchestrator in the `sentiric-infrastructure` repository.
+## 🔌 API Etkileşimleri
 
-1.  **Generate gRPC Code:** This service relies on gRPC code generated from `.proto` files in the `sentiric-core-interfaces` repository. You must generate this code before running the service.
-    *   Navigate to the `sentiric-core-interfaces` repository.
-    *   Run the make command: `make gen-go`
-    *   Copy the generated `gen/dialplan/v1` folder into this project's `gen/` directory.
+*   **Gelen (Sunucu):**
+    *   `sentiric-sip-signaling-service` (gRPC)
+*   **Giden (İstemci):**
+    *   `sentiric-user-service` (gRPC): Arayan kullanıcıyı doğrulamak için.
+    *   `PostgreSQL`: Yönlendirme kurallarını ve dialplan detaylarını okumak için.
 
-2.  **Configure Environment:**
-    ```bash
-    # Navigate to the sentiric-infrastructure directory
-    cd ../sentiric-infrastructure 
-    cp .env.local.example .env
-    ```
+## 🚀 Yerel Geliştirme
 
-3.  **Run the entire platform:** The central Docker Compose file will automatically build and run this service.
-    ```bash
-    # From the sentiric-infrastructure directory
-    docker compose up --build -d
-    ```
+1.  **Bağımlılıkları Yükleyin:** `go mod tidy`
+2.  **Ortam Değişkenlerini Ayarlayın:** `.env.docker`'ı `.env` olarak kopyalayın ve `POSTGRES_URL` ile `USER_SERVICE_GRPC_URL`'nin doğru olduğundan emin olun.
+3.  **Servisi Çalıştırın:** `go run main.go`
 
-4.  **View Logs:**
-    ```bash
-    docker compose logs -f dialplan-service
-    ```
+## 🤝 Katkıda Bulunma
 
-## Configuration
+Katkılarınızı bekliyoruz! Lütfen projenin ana [Sentiric Governance](https://github.com/sentiric/sentiric-governance) reposundaki kodlama standartlarına ve katkıda bulunma rehberine göz atın.
 
-All configuration is managed via environment variables passed from the `sentiric-infrastructure` repository's `.env` file. The primary variable for this service is `GRPC_PORT_DIALPLAN`, which defines the internal port the gRPC server will listen on.
+---
+## 🏛️ Anayasal Konum
 
-## Deployment
-
-This service is designed for containerized deployment. The multi-stage `Dockerfile` builds a minimal, static binary from a scratch image for maximum security and a small footprint. The CI/CD pipeline (to be created) will automatically build and push the image to the GitHub Container Registry (`ghcr.io`).
-
-## Contributing
-
-We welcome contributions! Please refer to the [Sentiric Governance](https://github.com/sentiric/sentiric-governance) repository for detailed coding standards, contribution guidelines, and the overall project vision.
-
-## License
-
-This project is licensed under the [License](LICENSE).
+Bu servis, [Sentiric Anayasası'nın (v11.0)](https://github.com/sentiric/sentiric-governance/blob/main/docs/blueprint/Architecture-Overview.md) **Zeka & Orkestrasyon Katmanı**'nda yer alan merkezi bir bileşendir.
