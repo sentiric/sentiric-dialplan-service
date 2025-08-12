@@ -32,14 +32,12 @@ const serviceName = "dialplan-service"
 
 var log zerolog.Logger
 
-// YENİ: Artık user-service'e bir istemci bağlantısı da tutacak.
 type server struct {
 	dialplanv1.UnimplementedDialplanServiceServer
 	db         *sql.DB
 	userClient userv1.UserServiceClient
 }
 
-// YENİ: gRPC istemcisi oluşturmak için yardımcı fonksiyon
 func createUserServiceClient() userv1.UserServiceClient {
 	userServiceURL := getEnvOrFail("USER_SERVICE_GRPC_URL")
 	certPath := getEnvOrFail("DIALPLAN_SERVICE_CERT_PATH")
@@ -64,7 +62,7 @@ func createUserServiceClient() userv1.UserServiceClient {
 	creds := credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
-		ServerName:   "user-service", // Sertifikanın CN/SAN alanıyla eşleşmeli
+		ServerName:   "user-service",
 	})
 
 	conn, err := grpc.NewClient(userServiceURL, grpc.WithTransportCredentials(creds))
@@ -74,6 +72,19 @@ func createUserServiceClient() userv1.UserServiceClient {
 
 	log.Info().Str("url", userServiceURL).Msg("User Service'e gRPC istemci bağlantısı başarılı")
 	return userv1.NewUserServiceClient(conn)
+}
+
+func getLoggerWithTraceID(ctx context.Context, baseLogger zerolog.Logger) (zerolog.Logger, string) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	traceID := "unknown"
+	if !ok {
+		return baseLogger.With().Str("trace_id", traceID).Logger(), traceID
+	}
+	traceIDValues := md.Get("x-trace-id")
+	if len(traceIDValues) > 0 {
+		traceID = traceIDValues[0]
+	}
+	return baseLogger.With().Str("trace_id", traceID).Logger(), traceID
 }
 
 func main() {
@@ -110,15 +121,10 @@ func main() {
 }
 
 func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
-	md, _ := metadata.FromIncomingContext(ctx)
-	traceID := "unknown"
-	if vals := md.Get("x-trace-id"); len(vals) > 0 {
-		traceID = vals[0]
-	}
-	l := log.With().Str("method", "ResolveDialplan").Str("caller", req.GetCallerContactValue()).Str("destination", req.GetDestinationNumber()).Str("trace_id", traceID).Logger()
+	l, traceID := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "ResolveDialplan").Str("caller", req.GetCallerContactValue()).Str("destination", req.GetDestinationNumber()).Logger()
 	l.Info().Msg("İstek alındı")
 
-	// Adım 1: Gelen numara için bir rota var mı diye kontrol et
 	var tenantID, activeDP, failsafeDP sql.NullString
 	var maintenance sql.NullBool
 	err := s.db.QueryRowContext(ctx,
@@ -129,7 +135,7 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 	if err != nil {
 		if err == sql.ErrNoRows {
 			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, traceID)
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil)
 		}
 		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
@@ -137,11 +143,12 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 
 	if maintenance.Valid && maintenance.Bool {
 		l.Info().Str("failsafe_dialplan", failsafeDP.String).Msg("Sistem bakım modunda, failsafe planına yönlendiriliyor.")
-		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil, traceID)
+		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil)
 	}
 
-	// Adım 2: User Service'e arayanın kim olduğunu sor
+	// DÜZELTME: Giden context'e trace_id'yi manuel olarak ekliyoruz.
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
+
 	userRes, err := s.userClient.FindUserByContact(userReqCtx, &userv1.FindUserByContactRequest{
 		ContactType:  "phone",
 		ContactValue: req.GetCallerContactValue(),
@@ -151,14 +158,13 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 		st, ok := status.FromError(err)
 		if ok && st.Code() == codes.NotFound {
 			l.Info().Msg("Arayan kullanıcı User Service'de bulunamadı, misafir (guest) planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil, nil, traceID)
+			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil, nil)
 		}
 
 		l.Error().Err(err).Msg("User Service'e yapılan FindUserByContact çağrısı başarısız")
-		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil, traceID) // Hata durumunda failsafe'e git
+		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil)
 	}
 
-	// Kullanıcıyı ve aradığı contact'ı bulduk
 	matchedUser := userRes.GetUser()
 	var matchedContact *userv1.Contact
 	for _, c := range matchedUser.Contacts {
@@ -169,11 +175,12 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 	}
 
 	l.Info().Str("active_dialplan", activeDP.String).Str("user_id", matchedUser.Id).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
-	return s.getDialplanByID(ctx, activeDP.String, matchedUser, matchedContact, traceID)
+	return s.getDialplanByID(ctx, activeDP.String, matchedUser, matchedContact)
 }
 
-func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact, traceID string) (*dialplanv1.ResolveDialplanResponse, error) {
-	l := log.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Str("trace_id", traceID).Logger()
+func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact) (*dialplanv1.ResolveDialplanResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Logger()
 	l.Info().Msg("Dialplan detayları alınıyor")
 
 	var description, action, tenantID sql.NullString
@@ -189,7 +196,7 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan (DP_SYSTEM_FAILSAFE) dahi bulunamadı!")
 				return nil, status.Error(codes.Internal, "Sistem dialplan eksik: DP_SYSTEM_FAILSAFE.")
 			}
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user, contact, traceID)
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user, contact)
 		}
 		l.Error().Err(err).Msg("Dialplan sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Dialplan sorgusu başarısız: %v", err)
@@ -199,7 +206,7 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 	if actionBytes != nil {
 		if err := json.Unmarshal(actionBytes, &dataMap); err != nil {
 			l.Warn().Err(err).Msg("action_data JSON parse edilemedi")
-			dataMap = make(map[string]string) // Hata durumunda boş harita ata
+			dataMap = make(map[string]string)
 		}
 	}
 
@@ -218,7 +225,6 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 	return resp, nil
 }
 
-// --- Değişiklik Gerektirmeyen Fonksiyonlar ---
 func connectToDBWithRetry(dsn string, maxRetries int) *sql.DB {
 	var db *sql.DB
 	var err error
@@ -265,6 +271,7 @@ func getEnv(key, fallback string) string {
 	}
 	return fallback
 }
+
 func getEnvOrFail(key string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
