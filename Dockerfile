@@ -1,30 +1,29 @@
-# Dockerfile for Go services (user-service, dialplan-service, agent-service)
+# --- İNŞA AŞAMASI (DEBIAN TABANLI) ---
+FROM golang:1.24-bullseye AS builder
 
-FROM golang:1.24.5-alpine AS builder
-
-RUN apk add --no-cache git
+RUN apt-get update && apt-get install -y --no-install-recommends git
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN go env -w GOPROXY=direct
 RUN go mod download
 
 COPY . .
 
-# Servis adını dinamik olarak almak için ARG kullanıyoruz
 ARG SERVICE_NAME
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/${SERVICE_NAME} .
+# Bu servisin main.go'su kök dizinde olduğu için build komutu farklı
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/${SERVICE_NAME} .
 
-# --- ÇALIŞTIRMA AŞAMASI ---
+# --- ÇALIŞTIRMA AŞAMASI (ALPINE) ---
 FROM alpine:latest
 
-# Healthcheck için netcat ve TLS doğrulaması için ca-certificates kuruyoruz
-RUN apk add --no-cache netcat-openbsd ca-certificates
+RUN apk add --no-cache ca-certificates
 
-# Servis adını builder'dan alıyoruz
 ARG SERVICE_NAME
 WORKDIR /app
-COPY --from=builder /app/${SERVICE_NAME} .
+COPY --from=builder /app/bin/${SERVICE_NAME} .
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
 
 ENTRYPOINT ["./sentiric-dialplan-service"]
