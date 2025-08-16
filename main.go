@@ -231,6 +231,11 @@ func connectToDBWithRetry(dsn string, maxRetries int) *sql.DB {
 	for i := 1; i <= maxRetries; i++ {
 		db, err = sql.Open("pgx", dsn)
 		if err == nil {
+			// YENİ: Bağlantı havuzu ayarlarını ekliyoruz.
+			db.SetConnMaxLifetime(time.Minute * 3)
+			db.SetMaxIdleConns(2)
+			db.SetMaxOpenConns(5)
+
 			if pingErr := db.Ping(); pingErr == nil {
 				log.Info().Msg("Veritabanı bağlantısı başarılı.")
 				return db
