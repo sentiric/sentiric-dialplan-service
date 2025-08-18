@@ -1,4 +1,4 @@
-// ========== FILE: sentiric-dialplan-service/main.go ==========
+// ========== FILE: sentiric-dialplan-service/main.go (Nihai ve Tam Hali) ==========
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
@@ -36,42 +37,6 @@ type server struct {
 	dialplanv1.UnimplementedDialplanServiceServer
 	db         *sql.DB
 	userClient userv1.UserServiceClient
-}
-
-func createUserServiceClient() userv1.UserServiceClient {
-	userServiceURL := getEnvOrFail("USER_SERVICE_GRPC_URL")
-	certPath := getEnvOrFail("DIALPLAN_SERVICE_CERT_PATH")
-	keyPath := getEnvOrFail("DIALPLAN_SERVICE_KEY_PATH")
-	caPath := getEnvOrFail("GRPC_TLS_CA_PATH")
-
-	clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
-	if err != nil {
-		log.Fatal().Err(err).Msg("İstemci sertifikası yüklenemedi")
-	}
-
-	caCert, err := os.ReadFile(caPath)
-	if err != nil {
-		log.Fatal().Err(err).Msg("CA sertifikası okunamadı")
-	}
-
-	caCertPool := x509.NewCertPool()
-	if !caCertPool.AppendCertsFromPEM(caCert) {
-		log.Fatal().Msg("CA sertifikası havuza eklenemedi")
-	}
-
-	creds := credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      caCertPool,
-		ServerName:   "user-service",
-	})
-
-	conn, err := grpc.NewClient(userServiceURL, grpc.WithTransportCredentials(creds))
-	if err != nil {
-		log.Fatal().Err(err).Msg("User Service'e gRPC bağlantısı kurulamadı")
-	}
-
-	log.Info().Str("url", userServiceURL).Msg("User Service'e gRPC istemci bağlantısı başarılı")
-	return userv1.NewUserServiceClient(conn)
 }
 
 func getLoggerWithTraceID(ctx context.Context, baseLogger zerolog.Logger) (zerolog.Logger, string) {
@@ -125,30 +90,45 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 	l = l.With().Str("method", "ResolveDialplan").Str("caller", req.GetCallerContactValue()).Str("destination", req.GetDestinationNumber()).Logger()
 	l.Info().Msg("İstek alındı")
 
-	var tenantID, activeDP, failsafeDP sql.NullString
-	var maintenance sql.NullBool
-	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id, active_dialplan_id, failsafe_dialplan_id, is_maintenance_mode
-		 FROM inbound_routes WHERE phone_number = $1`, req.GetDestinationNumber()).
-		Scan(&tenantID, &activeDP, &failsafeDP, &maintenance)
+	var route dialplanv1.InboundRoute
+	var activeDP, offHoursDP, failsafeDP sql.NullString
+
+	query := `
+		SELECT 
+			phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, 
+			is_maintenance_mode, default_language_code
+		FROM inbound_routes WHERE phone_number = $1
+	`
+	err := s.db.QueryRowContext(ctx, query, req.GetDestinationNumber()).Scan(
+		&route.PhoneNumber, &route.TenantId, &activeDP, &offHoursDP, &failsafeDP,
+		&route.IsMaintenanceMode, &route.DefaultLanguageCode,
+	)
+
+	if activeDP.Valid {
+		route.ActiveDialplanId = &activeDP.String
+	}
+	if offHoursDP.Valid {
+		route.OffHoursDialplanId = &offHoursDP.String
+	}
+	if failsafeDP.Valid {
+		route.FailsafeDialplanId = &failsafeDP.String
+	}
 
 	if err != nil {
 		if err == sql.ErrNoRows {
 			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil)
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, nil)
 		}
 		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
-	if maintenance.Valid && maintenance.Bool {
-		l.Info().Str("failsafe_dialplan", failsafeDP.String).Msg("Sistem bakım modunda, failsafe planına yönlendiriliyor.")
-		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil)
+	if route.IsMaintenanceMode {
+		l.Info().Str("failsafe_dialplan", safeString(route.FailsafeDialplanId)).Msg("Sistem bakım modunda, failsafe planına yönlendiriliyor.")
+		return s.getDialplanByID(ctx, safeString(route.FailsafeDialplanId), nil, nil, &route)
 	}
 
-	// DÜZELTME: Giden context'e trace_id'yi manuel olarak ekliyoruz.
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
-
 	userRes, err := s.userClient.FindUserByContact(userReqCtx, &userv1.FindUserByContactRequest{
 		ContactType:  "phone",
 		ContactValue: req.GetCallerContactValue(),
@@ -158,11 +138,10 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 		st, ok := status.FromError(err)
 		if ok && st.Code() == codes.NotFound {
 			l.Info().Msg("Arayan kullanıcı User Service'de bulunamadı, misafir (guest) planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil, nil)
+			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil, nil, &route)
 		}
-
 		l.Error().Err(err).Msg("User Service'e yapılan FindUserByContact çağrısı başarısız")
-		return s.getDialplanByID(ctx, failsafeDP.String, nil, nil)
+		return s.getDialplanByID(ctx, safeString(route.FailsafeDialplanId), nil, nil, &route)
 	}
 
 	matchedUser := userRes.GetUser()
@@ -174,34 +153,36 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 		}
 	}
 
-	l.Info().Str("active_dialplan", activeDP.String).Str("user_id", matchedUser.Id).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
-	return s.getDialplanByID(ctx, activeDP.String, matchedUser, matchedContact)
+	l.Info().Str("active_dialplan", safeString(route.ActiveDialplanId)).Str("user_id", matchedUser.Id).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
+	return s.getDialplanByID(ctx, safeString(route.ActiveDialplanId), matchedUser, matchedContact, &route)
 }
 
-func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact) (*dialplanv1.ResolveDialplanResponse, error) {
+func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	l, _ := getLoggerWithTraceID(ctx, log)
 	l = l.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Logger()
 	l.Info().Msg("Dialplan detayları alınıyor")
 
 	var description, action, tenantID sql.NullString
 	var actionBytes []byte
-
 	err := s.db.QueryRowContext(ctx,
 		`SELECT description, action, action_data, tenant_id FROM dialplans WHERE id = $1`, id).
 		Scan(&description, &action, &actionBytes, &tenantID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			l.Error().Msg("Dialplan ID bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			if id == "DP_SYSTEM_FAILSAFE" {
-				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan (DP_SYSTEM_FAILSAFE) dahi bulunamadı!")
+			if strings.HasPrefix(id, "DP_SYSTEM_FAILSAFE") {
+				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan dahi bulunamadı!")
 				return nil, status.Error(codes.Internal, "Sistem dialplan eksik: DP_SYSTEM_FAILSAFE.")
 			}
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user, contact)
+			lang := "TR"
+			if route != nil {
+				lang = strings.ToUpper(route.DefaultLanguageCode)
+			}
+			return s.getDialplanByID(ctx, fmt.Sprintf("DP_SYSTEM_FAILSAFE_%s", lang), user, contact, route)
 		}
 		l.Error().Err(err).Msg("Dialplan sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Dialplan sorgusu başarısız: %v", err)
 	}
-
 	var dataMap map[string]string
 	if actionBytes != nil {
 		if err := json.Unmarshal(actionBytes, &dataMap); err != nil {
@@ -209,78 +190,116 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 			dataMap = make(map[string]string)
 		}
 	}
-
 	resp := &dialplanv1.ResolveDialplanResponse{
-		DialplanId: id,
-		TenantId:   tenantID.String,
-		Action: &dialplanv1.DialplanAction{
-			Action:     action.String,
-			ActionData: &dialplanv1.ActionData{Data: dataMap},
-		},
+		DialplanId:     id,
+		TenantId:       tenantID.String,
+		Action:         &dialplanv1.DialplanAction{Action: action.String, ActionData: &dialplanv1.ActionData{Data: dataMap}},
 		MatchedUser:    user,
 		MatchedContact: contact,
+		InboundRoute:   route,
 	}
-
 	l.Info().Str("action", resp.Action.Action).Msg("Dialplan başarıyla çözümlendi")
 	return resp, nil
 }
 
-func connectToDBWithRetry(dsn string, maxRetries int) *sql.DB {
+func safeString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func createUserServiceClient() userv1.UserServiceClient {
+	userServiceURL := getEnvOrFail("USER_SERVICE_GRPC_URL")
+	certPath := getEnvOrFail("DIALPLAN_SERVICE_CERT_PATH")
+	keyPath := getEnvOrFail("DIALPLAN_SERVICE_KEY_PATH")
+	caPath := getEnvOrFail("GRPC_TLS_CA_PATH")
+
+	clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("İstemci sertifikası yüklenemedi")
+	}
+
+	caCert, err := os.ReadFile(caPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("CA sertifikası okunamadı")
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		log.Fatal().Msg("CA sertifikası havuza eklenemedi")
+	}
+
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		ServerName:   "user-service",
+	})
+
+	conn, err := grpc.NewClient(userServiceURL, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		log.Fatal().Err(err).Msg("User Service'e gRPC bağlantısı kurulamadı")
+	}
+
+	log.Info().Str("url", userServiceURL).Msg("User Service'e gRPC istemci bağlantısı başarılı")
+	return userv1.NewUserServiceClient(conn)
+}
+
+func connectToDBWithRetry(url string, maxRetries int) *sql.DB {
 	var db *sql.DB
 	var err error
-	for i := 1; i <= maxRetries; i++ {
-		db, err = sql.Open("pgx", dsn)
+	for i := 0; i < maxRetries; i++ {
+		db, err = sql.Open("pgx", url)
 		if err == nil {
-			// YENİ: Bağlantı havuzu ayarlarını ekliyoruz.
 			db.SetConnMaxLifetime(time.Minute * 3)
 			db.SetMaxIdleConns(2)
 			db.SetMaxOpenConns(5)
-
 			if pingErr := db.Ping(); pingErr == nil {
-				log.Info().Msg("Veritabanı bağlantısı başarılı.")
+				log.Info().Msg("Veritabanına bağlantı başarılı.")
 				return db
 			} else {
 				err = pingErr
 			}
 		}
-		log.Warn().Err(err).Int("attempt", i).Int("max_attempts", maxRetries).Msg("Veritabanına bağlanılamadı, 5 saniye sonra tekrar denenecek...")
+		log.Warn().Err(err).Int("attempt", i+1).Int("max_attempts", maxRetries).Msg("Veritabanına bağlanılamadı, 5 saniye sonra tekrar denenecek...")
 		time.Sleep(5 * time.Second)
 	}
-	log.Fatal().Err(err).Msg("Veritabanına bağlanılamadı")
+	log.Fatal().Err(err).Msgf("Veritabanına bağlanılamadı (%d deneme)", maxRetries)
 	return nil
 }
 
 func loadServerTLS(certPath, keyPath, caPath string) credentials.TransportCredentials {
-	serverCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Sertifika yüklenemedi")
+		log.Fatal().Err(err).Msg("Sunucu sertifikası yüklenemedi")
 	}
-	caPEM, err := ioutil.ReadFile(caPath)
+	caCert, err := ioutil.ReadFile(caPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("CA sertifikası okunamadı")
 	}
 	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM(caPEM) {
-		log.Fatal().Msg("CA sertifikası geçersiz.")
+	if !caPool.AppendCertsFromPEM(caCert) {
+		log.Fatal().Msg("CA sertifikası havuza eklenemedi.")
 	}
-	return credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{serverCert},
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{certificate},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    caPool,
-	})
+	}
+	return credentials.NewTLS(tlsConfig)
 }
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+func getEnv(key string, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
 	}
 	return fallback
 }
 
 func getEnvOrFail(key string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	val := os.Getenv(key)
+	if val == "" {
+		log.Fatal().Str("variable", key).Msg("Gerekli ortam değişkeni tanımlı değil")
 	}
-	log.Fatal().Str("variable", key).Msg("Gerekli ortam değişkeni tanımlı değil")
-	return ""
+	return val
 }
