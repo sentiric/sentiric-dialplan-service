@@ -1,4 +1,3 @@
-// ========== FILE: sentiric-dialplan-service/main.go (Nihai ve Tam Hali) ==========
 package main
 
 import (
@@ -57,7 +56,9 @@ func main() {
 	log = logger.New(serviceName)
 	log.Info().Msg("Dialplan Service başlatılıyor...")
 
-	db := connectToDBWithRetry(getEnvOrFail("POSTGRES_URL"), 10)
+	dbURL := getEnvOrFail("POSTGRES_URL")
+
+	db := connectToDBWithRetry(dbURL, 10)
 	defer db.Close()
 
 	userClient := createUserServiceClient()
@@ -214,33 +215,23 @@ func createUserServiceClient() userv1.UserServiceClient {
 	certPath := getEnvOrFail("DIALPLAN_SERVICE_CERT_PATH")
 	keyPath := getEnvOrFail("DIALPLAN_SERVICE_KEY_PATH")
 	caPath := getEnvOrFail("GRPC_TLS_CA_PATH")
-
 	clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("İstemci sertifikası yüklenemedi")
 	}
-
 	caCert, err := os.ReadFile(caPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("CA sertifikası okunamadı")
 	}
-
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(caCert) {
 		log.Fatal().Msg("CA sertifikası havuza eklenemedi")
 	}
-
-	creds := credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      caCertPool,
-		ServerName:   "user-service",
-	})
-
+	creds := credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{clientCert}, RootCAs: caCertPool, ServerName: "user-service"})
 	conn, err := grpc.NewClient(userServiceURL, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		log.Fatal().Err(err).Msg("User Service'e gRPC bağlantısı kurulamadı")
 	}
-
 	log.Info().Str("url", userServiceURL).Msg("User Service'e gRPC istemci bağlantısı başarılı")
 	return userv1.NewUserServiceClient(conn)
 }
@@ -248,8 +239,18 @@ func createUserServiceClient() userv1.UserServiceClient {
 func connectToDBWithRetry(url string, maxRetries int) *sql.DB {
 	var db *sql.DB
 	var err error
+
+	finalURL := url
+	if !strings.Contains(finalURL, "statement_cache_mode") {
+		separator := "?"
+		if strings.Contains(finalURL, "?") {
+			separator = "&"
+		}
+		finalURL = fmt.Sprintf("%s%sstatement_cache_mode=disable", finalURL, separator)
+	}
+
 	for i := 0; i < maxRetries; i++ {
-		db, err = sql.Open("pgx", url)
+		db, err = sql.Open("pgx", finalURL)
 		if err == nil {
 			db.SetConnMaxLifetime(time.Minute * 3)
 			db.SetMaxIdleConns(2)
@@ -281,11 +282,7 @@ func loadServerTLS(certPath, keyPath, caPath string) credentials.TransportCreden
 	if !caPool.AppendCertsFromPEM(caCert) {
 		log.Fatal().Msg("CA sertifikası havuza eklenemedi.")
 	}
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{certificate},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    caPool,
-	}
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: caPool}
 	return credentials.NewTLS(tlsConfig)
 }
 
