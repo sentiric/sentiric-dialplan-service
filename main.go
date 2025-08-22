@@ -114,18 +114,22 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 
 	// --- YENİ VE DAYANIKLI HATA YÖNETİMİ ---
 	if err != nil {
-		// Hatanın tipini kontrol et
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" { // 42P01 = undefined_table
+		// --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" {
 			l.Warn().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, nil)
+			// Failsafe için varsayılan bir route nesnesi oluşturuyoruz
+			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system", DefaultLanguageCode: "tr"}
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, failsafeRoute)
 		}
 
 		if err == sql.ErrNoRows {
 			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, nil)
+			// Failsafe için varsayılan bir route nesnesi oluşturuyoruz
+			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system", DefaultLanguageCode: "tr"}
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, failsafeRoute)
 		}
+		// --- DEĞİŞİKLİK BURADA BİTİYOR ---
 
-		// Diğer tüm veritabanı hataları
 		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
