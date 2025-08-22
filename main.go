@@ -10,7 +10,6 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
@@ -193,24 +192,25 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 	err := s.db.QueryRowContext(ctx,
 		`SELECT description, action, action_data, tenant_id FROM dialplans WHERE id = $1`, id).
 		Scan(&description, &action, &actionBytes, &tenantID)
+
 	if err != nil {
-		// --- YENİ: Failsafe planı bile bulunamazsa kritik hata ver ---
 		if err == sql.ErrNoRows {
 			l.Error().Msg("Dialplan ID bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			if strings.HasPrefix(id, "DP_SYSTEM_FAILSAFE") {
-				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan dahi bulunamadı! '02_core_data.sql' script'inin çalıştığından emin olun.")
-				// Fatal, programı sonlandıracağı için return'e gerek yok.
+
+			// Eğer zaten bir failsafe planı ararken bu hatayı alıyorsak, bu kritik bir durumdur.
+			if id == "DP_SYSTEM_FAILSAFE" {
+				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan (`DP_SYSTEM_FAILSAFE`) dahi bulunamadı! '02_core_data.sql' script'inin çalıştığından emin olun.")
 			}
-			// Hangi dilde failsafe'e gidileceğini belirle
-			lang := "TR"
-			if route != nil && route.DefaultLanguageCode != "" {
-				lang = strings.ToUpper(route.DefaultLanguageCode)
-			}
-			return s.getDialplanByID(ctx, fmt.Sprintf("DP_SYSTEM_FAILSAFE_%s", lang), user, contact, route)
+
+			// --- YENİ ve DOĞRU MANTIK ---
+			// Hata durumunda, dil kodundan bağımsız olarak her zaman 'DP_SYSTEM_FAILSAFE'i ara.
+			// Dil bilgisi zaten 'route' nesnesi içinde taşınacak ve agent-service tarafından kullanılacak.
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user, contact, route)
 		}
 		l.Error().Err(err).Msg("Dialplan sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Dialplan sorgusu başarısız: %v", err)
 	}
+
 	var dataMap map[string]string
 	if actionBytes != nil {
 		if err := json.Unmarshal(actionBytes, &dataMap); err != nil {
