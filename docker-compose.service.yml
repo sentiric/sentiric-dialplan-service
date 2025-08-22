@@ -1,61 +1,54 @@
-networks:
-  sentiric-net:
-    name: ${NETWORK_NAME:-sentiric-net}
-    driver: bridge
+# docker-compose.dev.yml
+# Service Geliştirme ortamı
 
+networks:
+  sentiric-net: { name: "${NETWORK_NAME:-sentiric-net}", driver: bridge }
+  
 volumes:
   postgres_data:
 
 services:
-  # VERİ KATMANI
+  # --- VERİ KATMANI ---
   postgres:
-    image: postgres:16-alpine
-    env_file:
-      - ./.env
+    build: { context: ../sentiric-postgres }
+    env_file: ["${ENV_FILE_PATH}"]
+    ports: ["5432:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../sentiric-config/postgres-init:/docker-entrypoint-initdb.d
-    # ports:
-    #   - "${POSTGRES_DB_PORT}:${POSTGRES_DB_PORT}"
-    networks:
-      - sentiric-net
-    profiles:
-      - default
-      - data
+      - ${CONFIG_REPO_PATH}/postgres-init:/docker-entrypoint-initdb.d
+    networks: [sentiric-net]
     restart: always
-
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
-      retries: 5    
+      retries: 5
+
+  # --- UYGULAMA SERVİSLERİ ---   
+  user-service:
+    build: { context: ../sentiric-user-service }
+    env_file: ["${ENV_FILE_PATH}"]
+    volumes: ["${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"]
+    networks: [sentiric-net]
+    restart: always
+    depends_on: { postgres: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50053"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s       
 
   dialplan-service:
-
-    build:
-      context: .
-      dockerfile: Dockerfile          
-      args:
-        SERVICE_NAME: sentiric-dialplan-service
-
-    env_file: 
-      - ./.env 
-    
-    volumes:
-      - ../sentiric-config/tls/certs:/etc/sentiric/tls:ro
-
-    # ports:
-    #   - "${DIALPLAN_SERVICE_GRPC_PORT}:${DIALPLAN_SERVICE_GRPC_PORT}"
-
-    networks:
-      - sentiric-net
-    
-    profiles:
-      - default
-      - app
-
+    build: { context: ../sentiric-dialplan-service }
+    env_file: ["${ENV_FILE_PATH}"]
+    volumes: ["${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"]
+    networks: [sentiric-net]
     restart: always
-
-    depends_on:
-      postgres:
-        condition: service_healthy
+    depends_on: { postgres: { condition: service_healthy }, user-service: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50054"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

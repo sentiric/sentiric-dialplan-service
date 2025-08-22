@@ -15,6 +15,7 @@ import (
 
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 
+	"github.com/jackc/pgx/v5/pgconn" // Hata tipini kontrol etmek için GEREKLİ
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
@@ -86,6 +87,9 @@ func main() {
 	}
 }
 
+// ======================================================================
+// ===                RESOLVE DIALPLAN (GÜNCELLENMİŞ HALİ)            ===
+// ======================================================================
 func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
 	l, traceID := getLoggerWithTraceID(ctx, log)
 	l = l.With().Str("method", "ResolveDialplan").Str("caller", req.GetCallerContactValue()).Str("destination", req.GetDestinationNumber()).Logger()
@@ -105,6 +109,25 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 		&route.IsMaintenanceMode, &route.DefaultLanguageCode,
 	)
 
+	// --- YENİ VE DAYANIKLI HATA YÖNETİMİ ---
+	if err != nil {
+		// Hatanın tipini kontrol et
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" { // 42P01 = undefined_table
+			l.Warn().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı, sistem failsafe planına yönlendiriliyor.")
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, nil)
+		}
+
+		if err == sql.ErrNoRows {
+			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
+			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, nil)
+		}
+
+		// Diğer tüm veritabanı hataları
+		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
+		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
+	}
+
+	// Null string'leri optional proto alanlarına güvenli bir şekilde ata
 	if activeDP.Valid {
 		route.ActiveDialplanId = &activeDP.String
 	}
@@ -113,15 +136,6 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 	}
 	if failsafeDP.Valid {
 		route.FailsafeDialplanId = &failsafeDP.String
-	}
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE_TR", nil, nil, nil)
-		}
-		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
-		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
 	if route.IsMaintenanceMode {
@@ -158,6 +172,10 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 	return s.getDialplanByID(ctx, safeString(route.ActiveDialplanId), matchedUser, matchedContact, &route)
 }
 
+// ======================================================================
+// ===                      (FONKSİYON SONU)                          ===
+// ======================================================================
+
 func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	l, _ := getLoggerWithTraceID(ctx, log)
 	l = l.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Logger()
@@ -169,14 +187,16 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 		`SELECT description, action, action_data, tenant_id FROM dialplans WHERE id = $1`, id).
 		Scan(&description, &action, &actionBytes, &tenantID)
 	if err != nil {
+		// --- YENİ: Failsafe planı bile bulunamazsa kritik hata ver ---
 		if err == sql.ErrNoRows {
 			l.Error().Msg("Dialplan ID bulunamadı, sistem failsafe planına yönlendiriliyor.")
 			if strings.HasPrefix(id, "DP_SYSTEM_FAILSAFE") {
-				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan dahi bulunamadı!")
-				return nil, status.Error(codes.Internal, "Sistem dialplan eksik: DP_SYSTEM_FAILSAFE.")
+				l.Fatal().Msg("KRİTİK HATA: Sistem failsafe dialplan dahi bulunamadı! '02_core_data.sql' script'inin çalıştığından emin olun.")
+				// Fatal, programı sonlandıracağı için return'e gerek yok.
 			}
+			// Hangi dilde failsafe'e gidileceğini belirle
 			lang := "TR"
-			if route != nil {
+			if route != nil && route.DefaultLanguageCode != "" {
 				lang = strings.ToUpper(route.DefaultLanguageCode)
 			}
 			return s.getDialplanByID(ctx, fmt.Sprintf("DP_SYSTEM_FAILSAFE_%s", lang), user, contact, route)
