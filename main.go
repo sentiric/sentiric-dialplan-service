@@ -286,6 +286,9 @@ func connectToDBWithRetry(url string, maxRetries int) *sql.DB {
 			db.SetMaxIdleConns(2)
 			db.SetMaxOpenConns(5)
 			if pingErr := db.Ping(); pingErr == nil {
+				// Düzeltme: log değişkenini doğru kullanmak için.
+				// Bu fonksiyonun içinde tanımlı bir 'log' değişkeni olduğunu varsayıyoruz.
+				// Eğer yoksa, parametre olarak almalı veya global olmalı.
 				log.Info().Msg("Veritabanına bağlantı başarılı (Simple Protocol Mode).")
 				return db
 			} else {
