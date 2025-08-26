@@ -21,8 +21,12 @@ Bu faz, servisin hafızadaki mock veriler yerine, PostgreSQL'deki kurallara gör
 Bu faz, dialplan'in daha karmaşık ve dinamik kuralları desteklemesini ve yönetilebilir olmasını hedefler.
 
 -   [ ] **Görev ID: DP-001 - CRUD gRPC Endpoint'leri**
-    -   **Açıklama:** `dashboard-ui`'nin `dialplans` ve `inbound_routes` tablolarını yönetebilmesi için `CreateDialplan`, `UpdateInboundRoute` gibi CRUD operasyonlarını destekleyen yeni gRPC endpoint'leri ekle.
-    -   **Durum:** ⬜ Planlandı.
+    -   **Açıklama:** `dashboard-ui`'nin `dialplans` ve `inbound_routes` tablolarını yönetebilmesi için `CreateDialplan`, `UpdateInboundRoute`, `DeleteInboundRoute` gibi CRUD operasyonlarını destekleyen yeni gRPC endpoint'leri ekle.
+    -   **Kabul Kriterleri:**
+        -   [ ] Protobuf tanımına (`contracts`) gerekli RPC'ler ve mesajlar eklenmeli.
+        -   [ ] Servis, bu RPC'leri implemente ederek veritabanı üzerinde tam yönetim sağlamalı.
+
+### **FAZ 3: Zeka & Genişleme**
 
 -   [ ] **Görev ID: DP-002 - Zamana Dayalı Yönlendirme**
     -   **Açıklama:** `inbound_routes` tablosuna `working_hours_dialplan_id` ve `off_hours_dialplan_id` gibi alanlar ekleyerek, çağrının geldiği saate göre farklı planların tetiklenmesini sağla.
