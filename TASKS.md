@@ -1,37 +1,57 @@
-# 🗺️ Sentiric Dialplan Service - Görev Listesi
+# 🗺️ Sentiric Dialplan Service - Geliştirme Yol Haritası (v4.0)
 
-Bu belge, `dialplan-service`'in geliştirme yol haritasını ve önceliklerini tanımlar.
-
----
-
-### Faz 1: Veritabanı Tabanlı Karar Mekanizması (Mevcut Durum)
-
-Bu faz, servisin hafızadaki mock veriler yerine, PostgreSQL'deki kurallara göre dinamik kararlar verebilmesini hedefler.
-
--   [x] **Temel gRPC Sunucusu:** `ResolveDialplan` RPC'sini implemente eden sunucu.
--   [x] **PostgreSQL Entegrasyonu:** `inbound_routes` ve `dialplans` tablolarından veri okuma yeteneği.
--   [x] **User Service Entegrasyonu:** Arayanın kimliğini doğrulamak için `user-service`'e gRPC çağrısı yapma.
--   [x] **Koşullu Mantık:** Arayanın durumuna (kayıtlı, misafir) ve hattın durumuna (bakım modu) göre farklı dialplan'ler döndürme.
--   [x] **Failsafe Mantığı:** Herhangi bir hata durumunda veya kural bulunamadığında, varsayılan olarak `DP_SYSTEM_FAILSAFE` planına yönlendirme.
+Bu belge, `dialplan-service`'in geliştirme görevlerini projenin genel fazlarına uygun olarak listeler.
 
 ---
 
-### Faz 2: Gelişmiş Kural Mantığı ve Yönetim (Sıradaki Öncelik)
+### **FAZ 1: Temel Karar Mekanizması (Mevcut Durum)**
 
-Bu faz, dialplan'in daha karmaşık ve dinamik kuralları desteklemesini ve yönetilebilir olmasını hedefler.
+**Amaç:** Gelen bir çağrıya, arayanın kimliğine ve hattın durumuna göre temel bir yönlendirme kararı verebilmek.
+
+-   [x] **Görev ID: DP-000A - Temel gRPC Sunucusu ve Veritabanı Entegrasyonu**
+    -   **Durum:** ✅ **Tamamlandı**
+    -   **Kabul Kriterleri:** `ResolveDialplan` RPC'sini sunan mTLS'li bir gRPC sunucusu çalışır ve PostgreSQL'e bağlanır.
+
+-   [x] **Görev ID: DP-000B - Koşullu Karar Mantığı**
+    -   **Durum:** ✅ **Tamamlandı**
+    -   **Kabul Kriterleri:**
+        -   [x] `inbound_routes` tablosundan aranan numaraya göre doğru kuralı bulur.
+        -   [x] `user-service`'e danışarak arayanın "kayıtlı" mı "misafir" mi olduğunu anlar.
+        -   [x] Hattın `is_maintenance_mode` bayrağını kontrol eder.
+        -   [x] Bu koşullara göre doğru `dialplan_id`'yi seçer (`active_dialplan_id`, `DP_GUEST_ENTRY`, `failsafe_dialplan_id`).
+
+-   [x] **Görev ID: DP-000C - Failsafe Mekanizması**
+    -   **Durum:** ✅ **Tamamlandı**
+    -   **Kabul Kriterleri:** `user-service` veya PostgreSQL'den bir hata döndüğünde, akış kesilmez; bunun yerine loglama yapılır ve `failsafe_dialplan_id`'ye (veya nihai olarak `DP_SYSTEM_FAILSAFE`'e) yönlendirme yapılır.
+
+---
+
+### **FAZ 2: Platformun Yönetilebilir Hale Getirilmesi (Sıradaki Öncelik)**
+
+**Amaç:** `dashboard-ui` gibi yönetim araçlarının, çağrı yönlendirme kurallarını tam olarak yönetebilmesini sağlamak.
 
 -   [ ] **Görev ID: DP-001 - CRUD gRPC Endpoint'leri**
-    -   **Açıklama:** `dashboard-ui`'nin `dialplans` ve `inbound_routes` tablolarını yönetebilmesi için `CreateDialplan`, `UpdateInboundRoute`, `DeleteInboundRoute` gibi CRUD operasyonlarını destekleyen yeni gRPC endpoint'leri ekle.
+    -   **Açıklama:** `dialplans` ve `inbound_routes` tablolarını yönetmek için tam CRUD (Create, Read, Update, Delete) yeteneği sağlayan gRPC endpoint'leri oluştur.
     -   **Kabul Kriterleri:**
-        -   [ ] Protobuf tanımına (`contracts`) gerekli RPC'ler ve mesajlar eklenmeli.
-        -   [ ] Servis, bu RPC'leri implemente ederek veritabanı üzerinde tam yönetim sağlamalı.
+        -   [ ] `sentiric-contracts`'e `CreateDialplan`, `UpdateDialplan`, `DeleteDialplan`, `ListDialplans` RPC'leri eklenmeli.
+        -   [ ] `sentiric-contracts`'e `CreateInboundRoute`, `UpdateInboundRoute`, `DeleteInboundRoute`, `ListInboundRoutes` RPC'leri eklenmeli.
+        -   [ ] `dialplan-service`, bu 10 yeni RPC'yi veritabanı işlemleriyle birlikte tam olarak implemente etmeli.
 
-### **FAZ 3: Zeka & Genişleme**
+---
 
--   [ ] **Görev ID: DP-002 - Zamana Dayalı Yönlendirme**
-    -   **Açıklama:** `inbound_routes` tablosuna `working_hours_dialplan_id` ve `off_hours_dialplan_id` gibi alanlar ekleyerek, çağrının geldiği saate göre farklı planların tetiklenmesini sağla.
-    -   **Durum:** ⬜ Planlandı.
+### **FAZ 3: Akıllı ve Dinamik Yönlendirme**
 
--   [ ] **Görev ID: DP-003 - Tatil Takvimi Entegrasyonu**
-    -   **Açıklama:** Resmi tatil günlerinde otomatik olarak "tatil anonsu" dialplan'ini tetikleyecek bir mantık ekle. Bu, `connectors-service` üzerinden bir takvim API'si ile entegre olabilir.
-    -   **Durum:** ⬜ Planlandı.
+**Amaç:** Çağrı yönlendirme kararlarını statik kuralların ötesine taşıyarak daha dinamik ve "akıllı" hale getirmek.
+
+-   [ ] **Görev ID: DP-002 - Zamana Dayalı Yönlendirme (Mesai Saatleri)**
+    -   **Açıklama:** Çağrının geldiği saate ve güne göre farklı planların tetiklenmesini sağla.
+    -   **Kabul Kriterleri:**
+        -   [ ] `inbound_routes` tablosuna `off_hours_dialplan_id` alanı eklenmeli.
+        -   [ ] `tenants` tablosuna `working_hours` (örn: "Mon-Fri 09:00-18:00") ve `timezone` alanları eklenmeli.
+        -   [ ] `ResolveDialplan` mantığı, çağrı zamanını kiracının zaman dilimine göre kontrol ederek `active_dialplan_id` veya `off_hours_dialplan_id` arasında seçim yapmalı.
+
+-   [ ] **Görev ID: DP-003 - Harici Veriye Dayalı Yönlendirme (Tatil Takvimi)**
+    -   **Açıklama:** Resmi tatil günlerinde otomatik olarak "tatil anonsu" dialplan'ini tetikleyecek bir mantık ekle.
+    -   **Kabul Kriterleri:**
+        -   [ ] `dialplan-service`, `connectors-service` (henüz yok) veya harici bir takvim API'si ile entegre olabilmeli.
+        -   [ ] Çağrı geldiğinde, o günün tatil olup olmadığını kontrol etmeli ve eğer tatilse özel bir `holiday_dialplan_id`'yi tetiklemeli.
