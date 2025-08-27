@@ -24,11 +24,12 @@ Bu belge, `dialplan-service`'in geliştirme görevlerini projenin genel fazları
     -   **Durum:** ✅ **Tamamlandı**
     -   **Kabul Kriterleri:** `user-service` veya PostgreSQL'den bir hata döndüğünde, akış kesilmez; bunun yerine loglama yapılır ve `failsafe_dialplan_id`'ye (veya nihai olarak `DP_SYSTEM_FAILSAFE`'e) yönlendirme yapılır.
 
-- [ ] **Görev ID: DP-004 - Otomatik Inbound Route Oluşturma (Auto-Provisioning)**
+-   [x] **Görev ID: DP-004 - Otomatik Inbound Route Oluşturma (Auto-Provisioning)**
+    -   **Durum:** ✅ **Tamamlandı**
     -   **Açıklama:** Eğer aranan bir numara `inbound_routes` tablosunda bulunamazsa, bu çağrıyı reddetmek yerine, o numara için otomatik olarak yeni bir `inbound_route` kaydı oluştur. Bu yeni kural, varsayılan olarak "sistem" tenant'ına ve `DP_GUEST_ENTRY` dialplan'ine atanmalıdır.
     -   **Kabul Kriterleri:**
-        -   [ ] Veritabanında olmayan bir numaraya çağrı geldiğinde, `dialplan-service` loglarında "Yeni inbound route tespit edildi ve oluşturuldu" gibi bir mesaj görünmeli.
-        -   [ ] Çağrı, `DP_SYSTEM_FAILSAFE` yerine `DP_GUEST_ENTRY` planı ile devam etmeli.
+        -   [x] Veritabanında olmayan bir numaraya çağrı geldiğinde, `dialplan-service` loglarında "Yeni inbound route tespit edildi ve oluşturuldu" gibi bir mesaj görünmeli.
+        -   [x] Çağrı, `DP_SYSTEM_FAILSAFE` yerine `DP_GUEST_ENTRY` planı ile devam etmeli.
         -   [ ] Yöneticiye, yeni bir numaranın sisteme eklendiğine dair bir bildirim (gelecekte) gönderilmelidir.
         
 ---
@@ -38,6 +39,7 @@ Bu belge, `dialplan-service`'in geliştirme görevlerini projenin genel fazları
 **Amaç:** `dashboard-ui` gibi yönetim araçlarının, çağrı yönlendirme kurallarını tam olarak yönetebilmesini sağlamak.
 
 -   [ ] **Görev ID: DP-001 - CRUD gRPC Endpoint'leri**
+    -   **Durum:** 🟡 **Başlandı** (Prototipler oluşturuldu, implementasyon gerekiyor)
     -   **Açıklama:** `dialplans` ve `inbound_routes` tablolarını yönetmek için tam CRUD (Create, Read, Update, Delete) yeteneği sağlayan gRPC endpoint'leri oluştur.
     -   **Kabul Kriterleri:**
         -   [ ] `sentiric-contracts`'e `CreateDialplan`, `UpdateDialplan`, `DeleteDialplan`, `ListDialplans` RPC'leri eklenmeli.

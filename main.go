@@ -89,7 +89,8 @@ func main() {
 	}
 }
 
-// ... (ResolveDialplan ve diğer yardımcı fonksiyonlar aynı kalacak) ...
+// --- Ana Karar Mekanizması ---
+
 func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
 	l, traceID := getLoggerWithTraceID(ctx, log)
 	l = l.With().Str("method", "ResolveDialplan").Str("caller", req.GetCallerContactValue()).Str("destination", req.GetDestinationNumber()).Logger()
@@ -111,21 +112,27 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" {
-			l.Warn().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı, sistem failsafe planına yönlendiriliyor.")
+			l.Error().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı, sistem failsafe planına yönlendiriliyor.")
 			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system", DefaultLanguageCode: "tr"}
 			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, failsafeRoute)
 		}
 
 		if err == sql.ErrNoRows {
-			l.Warn().Msg("Aranan numara için inbound_route bulunamadı, sistem failsafe planına yönlendiriliyor.")
-			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system", DefaultLanguageCode: "tr"}
-			return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, failsafeRoute)
+			l.Info().Msg("Aranan numara için inbound_route bulunamadı. Otomatik olarak yeni bir route oluşturuluyor (Auto-Provisioning).")
+			newRoute, provisionErr := s.autoProvisionInboundRoute(ctx, req.GetDestinationNumber())
+			if provisionErr != nil {
+				l.Error().Err(provisionErr).Msg("Otomatik route oluşturma başarısız oldu, sistem failsafe planına yönlendiriliyor.")
+				failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system", DefaultLanguageCode: "tr"}
+				return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, failsafeRoute)
+			}
+			l.Info().Msg("Yeni route başarıyla oluşturuldu, çağrı misafir (guest) planına yönlendiriliyor.")
+			return s.getDialplanByID(ctx, "DP_GUEST_ENTRY", nil, nil, newRoute)
 		}
 
 		l.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
-	// ... (geri kalan kod aynı) ...
+
 	if activeDP.Valid {
 		route.ActiveDialplanId = &activeDP.String
 	}
@@ -165,6 +172,414 @@ func (s *server) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDia
 	return s.getDialplanByID(ctx, safeString(route.ActiveDialplanId), matchedUser, matchedContact, &route)
 }
 
+// --- Inbound Route Yönetimi (CRUD) ---
+
+func (s *server) CreateInboundRoute(ctx context.Context, req *dialplanv1.CreateInboundRouteRequest) (*dialplanv1.CreateInboundRouteResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	route := req.GetRoute()
+	if route == nil {
+		return nil, status.Error(codes.InvalidArgument, "Route nesnesi boş olamaz")
+	}
+	l = l.With().Str("method", "CreateInboundRoute").Str("phone_number", route.GetPhoneNumber()).Logger()
+	l.Info().Msg("Yeni inbound route oluşturma isteği alındı.")
+
+	query := `
+		INSERT INTO inbound_routes 
+		(phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+	_, err := s.db.ExecContext(ctx, query,
+		route.PhoneNumber, route.TenantId, route.ActiveDialplanId,
+		route.OffHoursDialplanId, route.FailsafeDialplanId,
+		route.IsMaintenanceMode, route.DefaultLanguageCode,
+	)
+
+	if err != nil {
+		l.Error().Err(err).Msg("Inbound route oluşturulamadı.")
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" { // unique_violation
+			return nil, status.Errorf(codes.AlreadyExists, "Bu telefon numarası zaten kayıtlı: %s", route.PhoneNumber)
+		}
+		return nil, status.Errorf(codes.Internal, "Inbound route oluşturulurken bir hata oluştu: %v", err)
+	}
+
+	l.Info().Msg("Inbound route başarıyla oluşturuldu.")
+	return &dialplanv1.CreateInboundRouteResponse{Route: route}, nil
+}
+
+func (s *server) GetInboundRoute(ctx context.Context, req *dialplanv1.GetInboundRouteRequest) (*dialplanv1.GetInboundRouteResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "GetInboundRoute").Str("phone_number", req.GetPhoneNumber()).Logger()
+	l.Info().Msg("Inbound route getirme isteği alındı.")
+
+	var route dialplanv1.InboundRoute
+	var activeDP, offHoursDP, failsafeDP sql.NullString
+
+	query := `SELECT phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code FROM inbound_routes WHERE phone_number = $1`
+	err := s.db.QueryRowContext(ctx, query, req.GetPhoneNumber()).Scan(
+		&route.PhoneNumber, &route.TenantId, &activeDP, &offHoursDP, &failsafeDP,
+		&route.IsMaintenanceMode, &route.DefaultLanguageCode,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			l.Warn().Msg("İstenen inbound_route bulunamadı.")
+			return nil, status.Errorf(codes.NotFound, "Inbound route bulunamadı: %s", req.GetPhoneNumber())
+		}
+		l.Error().Err(err).Msg("Inbound route sorgusu başarısız.")
+		return nil, status.Errorf(codes.Internal, "Inbound route sorgulanırken bir hata oluştu: %v", err)
+	}
+
+	if activeDP.Valid {
+		route.ActiveDialplanId = &activeDP.String
+	}
+	if offHoursDP.Valid {
+		route.OffHoursDialplanId = &offHoursDP.String
+	}
+	if failsafeDP.Valid {
+		route.FailsafeDialplanId = &failsafeDP.String
+	}
+
+	l.Info().Msg("Inbound route başarıyla bulundu.")
+	return &dialplanv1.GetInboundRouteResponse{Route: &route}, nil
+}
+
+func (s *server) UpdateInboundRoute(ctx context.Context, req *dialplanv1.UpdateInboundRouteRequest) (*dialplanv1.UpdateInboundRouteResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	route := req.GetRoute()
+	if route == nil {
+		return nil, status.Error(codes.InvalidArgument, "Route nesnesi boş olamaz")
+	}
+	l = l.With().Str("method", "UpdateInboundRoute").Str("phone_number", route.GetPhoneNumber()).Logger()
+	l.Info().Msg("Inbound route güncelleme isteği alındı.")
+
+	query := `
+		UPDATE inbound_routes SET
+		tenant_id = $2, active_dialplan_id = $3, off_hours_dialplan_id = $4, failsafe_dialplan_id = $5,
+		is_maintenance_mode = $6, default_language_code = $7
+		WHERE phone_number = $1
+	`
+	res, err := s.db.ExecContext(ctx, query,
+		route.PhoneNumber, route.TenantId, route.ActiveDialplanId,
+		route.OffHoursDialplanId, route.FailsafeDialplanId,
+		route.IsMaintenanceMode, route.DefaultLanguageCode,
+	)
+	if err != nil {
+		l.Error().Err(err).Msg("Inbound route güncellenemedi.")
+		return nil, status.Errorf(codes.Internal, "Inbound route güncellenirken bir hata oluştu: %v", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return nil, status.Errorf(codes.NotFound, "Güncellenecek inbound route bulunamadı: %s", route.PhoneNumber)
+	}
+
+	l.Info().Msg("Inbound route başarıyla güncellendi.")
+	return &dialplanv1.UpdateInboundRouteResponse{Route: route}, nil
+}
+
+func (s *server) DeleteInboundRoute(ctx context.Context, req *dialplanv1.DeleteInboundRouteRequest) (*dialplanv1.DeleteInboundRouteResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "DeleteInboundRoute").Str("phone_number", req.GetPhoneNumber()).Logger()
+	l.Info().Msg("Inbound route silme isteği alındı.")
+
+	res, err := s.db.ExecContext(ctx, "DELETE FROM inbound_routes WHERE phone_number = $1", req.GetPhoneNumber())
+	if err != nil {
+		l.Error().Err(err).Msg("Inbound route silinemedi.")
+		return nil, status.Errorf(codes.Internal, "Inbound route silinirken bir hata oluştu: %v", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		l.Warn().Msg("Silinecek inbound route bulunamadı.")
+	}
+
+	l.Info().Msg("Inbound route başarıyla silindi.")
+	return &dialplanv1.DeleteInboundRouteResponse{Success: true}, nil
+}
+
+func (s *server) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInboundRoutesRequest) (*dialplanv1.ListInboundRoutesResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "ListInboundRoutes").Str("tenant_id", req.GetTenantId()).Logger()
+	l.Info().Msg("Inbound route listeleme isteği alındı.")
+
+	page := req.GetPage()
+	if page < 1 {
+		page = 1
+	}
+	pageSize := req.GetPageSize()
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	offset := (page - 1) * pageSize
+
+	baseQuery := "FROM inbound_routes"
+	args := []interface{}{}
+	if req.GetTenantId() != "" {
+		baseQuery += " WHERE tenant_id = $1"
+		args = append(args, req.GetTenantId())
+	}
+
+	var totalCount int32
+	countQuery := "SELECT count(*) " + baseQuery
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+		l.Error().Err(err).Msg("Toplam route sayısı alınamadı.")
+		return nil, status.Error(codes.Internal, "Route'lar listelenemedi.")
+	}
+
+	dataQuery := "SELECT phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code " + baseQuery + fmt.Sprintf(" ORDER BY phone_number LIMIT %d OFFSET %d", pageSize, offset)
+	rows, err := s.db.QueryContext(ctx, dataQuery, args...)
+	if err != nil {
+		l.Error().Err(err).Msg("Route'lar sorgulanamadı.")
+		return nil, status.Error(codes.Internal, "Route'lar listelenemedi.")
+	}
+	defer rows.Close()
+
+	routes := []*dialplanv1.InboundRoute{}
+	for rows.Next() {
+		var route dialplanv1.InboundRoute
+		var activeDP, offHoursDP, failsafeDP sql.NullString
+		if err := rows.Scan(&route.PhoneNumber, &route.TenantId, &activeDP, &offHoursDP, &failsafeDP, &route.IsMaintenanceMode, &route.DefaultLanguageCode); err != nil {
+			l.Error().Err(err).Msg("Route verisi okunamadı.")
+			continue
+		}
+		if activeDP.Valid {
+			route.ActiveDialplanId = &activeDP.String
+		}
+		if offHoursDP.Valid {
+			route.OffHoursDialplanId = &offHoursDP.String
+		}
+		if failsafeDP.Valid {
+			route.FailsafeDialplanId = &failsafeDP.String
+		}
+		routes = append(routes, &route)
+	}
+
+	l.Info().Int32("count", int32(len(routes))).Msg("Inbound route'lar başarıyla listelendi.")
+	return &dialplanv1.ListInboundRoutesResponse{Routes: routes, TotalCount: totalCount}, nil
+}
+
+// --- Dialplan Yönetimi (CRUD) ---
+
+func (s *server) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) (*dialplanv1.CreateDialplanResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	dp := req.GetDialplan()
+	if dp == nil {
+		return nil, status.Error(codes.InvalidArgument, "Dialplan nesnesi boş olamaz.")
+	}
+	l = l.With().Str("method", "CreateDialplan").Str("dialplan_id", dp.GetId()).Logger()
+	l.Info().Msg("Yeni dialplan oluşturma isteği alındı.")
+
+	actionDataBytes, err := json.Marshal(dp.GetAction().GetActionData().GetData())
+	if err != nil {
+		l.Error().Err(err).Msg("ActionData JSON'a çevrilemedi.")
+		return nil, status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
+	}
+
+	query := `INSERT INTO dialplans (id, tenant_id, description, action, action_data) VALUES ($1, $2, $3, $4, $5)`
+	_, err = s.db.ExecContext(ctx, query, dp.Id, dp.TenantId, dp.Description, dp.GetAction().GetAction(), actionDataBytes)
+
+	if err != nil {
+		l.Error().Err(err).Msg("Dialplan oluşturulamadı.")
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			return nil, status.Errorf(codes.AlreadyExists, "Bu dialplan ID zaten kayıtlı: %s", dp.Id)
+		}
+		return nil, status.Errorf(codes.Internal, "Dialplan oluşturulurken bir hata oluştu: %v", err)
+	}
+
+	l.Info().Msg("Dialplan başarıyla oluşturuldu.")
+	return &dialplanv1.CreateDialplanResponse{Dialplan: dp}, nil
+}
+
+func (s *server) GetDialplan(ctx context.Context, req *dialplanv1.GetDialplanRequest) (*dialplanv1.GetDialplanResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "GetDialplan").Str("dialplan_id", req.GetId()).Logger()
+	l.Info().Msg("Dialplan getirme isteği alındı.")
+
+	var dp dialplanv1.Dialplan
+	var action dialplanv1.DialplanAction
+	var actionData dialplanv1.ActionData
+	var actionStr sql.NullString
+	var actionDataBytes []byte
+
+	query := `SELECT id, tenant_id, description, action, action_data FROM dialplans WHERE id = $1`
+	err := s.db.QueryRowContext(ctx, query, req.GetId()).Scan(&dp.Id, &dp.TenantId, &dp.Description, &actionStr, &actionDataBytes)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			l.Warn().Msg("İstenen dialplan bulunamadı.")
+			return nil, status.Errorf(codes.NotFound, "Dialplan bulunamadı: %s", req.GetId())
+		}
+		l.Error().Err(err).Msg("Dialplan sorgusu başarısız.")
+		return nil, status.Errorf(codes.Internal, "Dialplan sorgulanırken bir hata oluştu: %v", err)
+	}
+
+	if actionStr.Valid {
+		action.Action = actionStr.String
+	}
+	if actionDataBytes != nil {
+		var dataMap map[string]string
+		if err := json.Unmarshal(actionDataBytes, &dataMap); err == nil {
+			actionData.Data = dataMap
+		}
+	}
+	action.ActionData = &actionData
+	dp.Action = &action
+
+	l.Info().Msg("Dialplan başarıyla bulundu.")
+	return &dialplanv1.GetDialplanResponse{Dialplan: &dp}, nil
+}
+
+func (s *server) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDialplanRequest) (*dialplanv1.UpdateDialplanResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	dp := req.GetDialplan()
+	if dp == nil {
+		return nil, status.Error(codes.InvalidArgument, "Dialplan nesnesi boş olamaz.")
+	}
+	l = l.With().Str("method", "UpdateDialplan").Str("dialplan_id", dp.GetId()).Logger()
+	l.Info().Msg("Dialplan güncelleme isteği alındı.")
+
+	actionDataBytes, err := json.Marshal(dp.GetAction().GetActionData().GetData())
+	if err != nil {
+		l.Error().Err(err).Msg("ActionData JSON'a çevrilemedi.")
+		return nil, status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
+	}
+
+	query := `UPDATE dialplans SET tenant_id = $2, description = $3, action = $4, action_data = $5 WHERE id = $1`
+	res, err := s.db.ExecContext(ctx, query, dp.Id, dp.TenantId, dp.Description, dp.GetAction().GetAction(), actionDataBytes)
+	if err != nil {
+		l.Error().Err(err).Msg("Dialplan güncellenemedi.")
+		return nil, status.Errorf(codes.Internal, "Dialplan güncellenirken bir hata oluştu: %v", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return nil, status.Errorf(codes.NotFound, "Güncellenecek dialplan bulunamadı: %s", dp.Id)
+	}
+
+	l.Info().Msg("Dialplan başarıyla güncellendi.")
+	return &dialplanv1.UpdateDialplanResponse{Dialplan: dp}, nil
+}
+
+func (s *server) DeleteDialplan(ctx context.Context, req *dialplanv1.DeleteDialplanRequest) (*dialplanv1.DeleteDialplanResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "DeleteDialplan").Str("dialplan_id", req.GetId()).Logger()
+	l.Info().Msg("Dialplan silme isteği alındı.")
+
+	res, err := s.db.ExecContext(ctx, "DELETE FROM dialplans WHERE id = $1", req.GetId())
+	if err != nil {
+		l.Error().Err(err).Msg("Dialplan silinemedi.")
+		return nil, status.Errorf(codes.Internal, "Dialplan silinirken bir hata oluştu: %v", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		l.Warn().Msg("Silinecek dialplan bulunamadı.")
+	}
+
+	l.Info().Msg("Dialplan başarıyla silindi.")
+	return &dialplanv1.DeleteDialplanResponse{Success: true}, nil
+}
+
+func (s *server) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "ListDialplans").Str("tenant_id", req.GetTenantId()).Logger()
+	l.Info().Msg("Dialplan listeleme isteği alındı.")
+
+	page := req.GetPage()
+	if page < 1 {
+		page = 1
+	}
+	pageSize := req.GetPageSize()
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	offset := (page - 1) * pageSize
+
+	baseQuery := "FROM dialplans"
+	args := []interface{}{}
+	if req.GetTenantId() != "" {
+		baseQuery += " WHERE tenant_id = $1"
+		args = append(args, req.GetTenantId())
+	}
+
+	var totalCount int32
+	countQuery := "SELECT count(*) " + baseQuery
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+		l.Error().Err(err).Msg("Toplam dialplan sayısı alınamadı.")
+		return nil, status.Error(codes.Internal, "Dialplan'lar listelenemedi.")
+	}
+
+	dataQuery := "SELECT id, tenant_id, description, action, action_data " + baseQuery + fmt.Sprintf(" ORDER BY id LIMIT %d OFFSET %d", pageSize, offset)
+	rows, err := s.db.QueryContext(ctx, dataQuery, args...)
+	if err != nil {
+		l.Error().Err(err).Msg("Dialplan'lar sorgulanamadı.")
+		return nil, status.Error(codes.Internal, "Dialplan'lar listelenemedi.")
+	}
+	defer rows.Close()
+
+	dialplans := []*dialplanv1.Dialplan{}
+	for rows.Next() {
+		var dp dialplanv1.Dialplan
+		var action dialplanv1.DialplanAction
+		var actionData dialplanv1.ActionData
+		var actionStr sql.NullString
+		var actionDataBytes []byte
+		if err := rows.Scan(&dp.Id, &dp.TenantId, &dp.Description, &actionStr, &actionDataBytes); err != nil {
+			l.Error().Err(err).Msg("Dialplan verisi okunamadı.")
+			continue
+		}
+		if actionStr.Valid {
+			action.Action = actionStr.String
+		}
+		if actionDataBytes != nil {
+			var dataMap map[string]string
+			if err := json.Unmarshal(actionDataBytes, &dataMap); err == nil {
+				actionData.Data = dataMap
+			}
+		}
+		action.ActionData = &actionData
+		dp.Action = &action
+		dialplans = append(dialplans, &dp)
+	}
+
+	l.Info().Int32("count", int32(len(dialplans))).Msg("Dialplan'lar başarıyla listelendi.")
+	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: totalCount}, nil
+}
+
+// --- Yardımcı Fonksiyonlar ---
+
+func (s *server) autoProvisionInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
+	l, _ := getLoggerWithTraceID(ctx, log)
+	l = l.With().Str("method", "autoProvisionInboundRoute").Str("phone_number", phoneNumber).Logger()
+
+	defaultGuestPlan := "DP_GUEST_ENTRY"
+	defaultSystemTenant := "system"
+	defaultLangCode := "tr"
+
+	query := `
+		INSERT INTO inbound_routes (phone_number, tenant_id, active_dialplan_id, default_language_code)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (phone_number) DO NOTHING
+	`
+
+	_, err := s.db.ExecContext(ctx, query, phoneNumber, defaultSystemTenant, defaultGuestPlan, defaultLangCode)
+	if err != nil {
+		l.Error().Err(err).Msg("Yeni inbound route veritabanına eklenemedi.")
+		return nil, err
+	}
+
+	newRoute := &dialplanv1.InboundRoute{
+		PhoneNumber:         phoneNumber,
+		TenantId:            defaultSystemTenant,
+		ActiveDialplanId:    &defaultGuestPlan,
+		DefaultLanguageCode: defaultLangCode,
+		IsMaintenanceMode:   false,
+	}
+
+	l.Info().Msg("Yeni inbound route başarıyla veritabanına eklendi.")
+	return newRoute, nil
+}
+
 func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	l, _ := getLoggerWithTraceID(ctx, log)
 	l = l.With().Str("method", "getDialplanByID").Str("dialplan_id", id).Logger()
@@ -179,10 +594,8 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 	if err != nil {
 		l.Error().Err(err).Str("failed_dialplan_id", id).Msg("Dialplan ID sorgusu başarısız, failsafe tetikleniyor.")
 
-		// GÜVENLİK DÜZELTMESİ: log.Fatal yerine nihai failsafe mekanizması
 		if id == "DP_SYSTEM_FAILSAFE" {
 			l.Error().Msg("KRİTİK HATA: Sistem failsafe dialplan (`DP_SYSTEM_FAILSAFE`) dahi bulunamadı! Servis çökmemek için hardcoded bir yanıt üretiyor.")
-			// Bu, veritabanı tamamen çöktüğünde bile servisin ayakta kalmasını sağlar.
 			return &dialplanv1.ResolveDialplanResponse{
 				DialplanId: "ULTIMATE_FAILSAFE",
 				TenantId:   "system",
@@ -195,7 +608,6 @@ func (s *server) getDialplanByID(ctx context.Context, id string, user *userv1.Us
 				InboundRoute: route,
 			}, nil
 		}
-
 		return s.getDialplanByID(ctx, "DP_SYSTEM_FAILSAFE", user, contact, route)
 	}
 
@@ -255,16 +667,12 @@ func connectToDBWithRetry(url string, maxRetries int) *sql.DB {
 	var db *sql.DB
 	var err error
 
-	// 1. URL'yi parse et
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		log.Fatal().Err(err).Msg("PostgreSQL URL parse edilemedi")
 	}
 
-	// 2. Connection Pooler ile uyumluluk için prepared statement'ları devre dışı bırak
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-
-	// 3. Yeni, yapılandırılmış URL ile bağlantıyı yeniden dene
 	finalURL := stdlib.RegisterConnConfig(config.ConnConfig)
 
 	for i := 0; i < maxRetries; i++ {
@@ -274,9 +682,6 @@ func connectToDBWithRetry(url string, maxRetries int) *sql.DB {
 			db.SetMaxIdleConns(2)
 			db.SetMaxOpenConns(5)
 			if pingErr := db.Ping(); pingErr == nil {
-				// Düzeltme: log değişkenini doğru kullanmak için.
-				// Bu fonksiyonun içinde tanımlı bir 'log' değişkeni olduğunu varsayıyoruz.
-				// Eğer yoksa, parametre olarak almalı veya global olmalı.
 				log.Info().Msg("Veritabanına bağlantı başarılı (Simple Protocol Mode).")
 				return db
 			} else {
