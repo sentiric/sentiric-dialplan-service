@@ -24,6 +24,13 @@ Bu belge, `dialplan-service`'in geliştirme görevlerini projenin genel fazları
     -   **Durum:** ✅ **Tamamlandı**
     -   **Kabul Kriterleri:** `user-service` veya PostgreSQL'den bir hata döndüğünde, akış kesilmez; bunun yerine loglama yapılır ve `failsafe_dialplan_id`'ye (veya nihai olarak `DP_SYSTEM_FAILSAFE`'e) yönlendirme yapılır.
 
+- [ ] **Görev ID: DP-004 - Otomatik Inbound Route Oluşturma (Auto-Provisioning)**
+    -   **Açıklama:** Eğer aranan bir numara `inbound_routes` tablosunda bulunamazsa, bu çağrıyı reddetmek yerine, o numara için otomatik olarak yeni bir `inbound_route` kaydı oluştur. Bu yeni kural, varsayılan olarak "sistem" tenant'ına ve `DP_GUEST_ENTRY` dialplan'ine atanmalıdır.
+    -   **Kabul Kriterleri:**
+        -   [ ] Veritabanında olmayan bir numaraya çağrı geldiğinde, `dialplan-service` loglarında "Yeni inbound route tespit edildi ve oluşturuldu" gibi bir mesaj görünmeli.
+        -   [ ] Çağrı, `DP_SYSTEM_FAILSAFE` yerine `DP_GUEST_ENTRY` planı ile devam etmeli.
+        -   [ ] Yöneticiye, yeni bir numaranın sisteme eklendiğine dair bir bildirim (gelecekte) gönderilmelidir.
+        
 ---
 
 ### **FAZ 2: Platformun Yönetilebilir Hale Getirilmesi (Sıradaki Öncelik)**
