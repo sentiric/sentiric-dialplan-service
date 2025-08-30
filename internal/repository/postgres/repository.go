@@ -1,3 +1,4 @@
+// File: sentiric-dialplan-service/internal/repository/postgres/repository.go
 package postgres
 
 import (
@@ -12,13 +13,11 @@ import (
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 )
 
-// Repository, veritabanı işlemlerini yönetir.
 type Repository struct {
 	db  *pgxpool.Pool
 	log zerolog.Logger
 }
 
-// NewRepository, yeni bir repository örneği oluşturur.
 func NewRepository(db *pgxpool.Pool, log zerolog.Logger) *Repository {
 	return &Repository{db: db, log: log}
 }
@@ -52,11 +51,16 @@ func (r *Repository) FindInboundRouteByPhone(ctx context.Context, phoneNumber st
 }
 
 func (r *Repository) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
+	// Sorgudan sip_trunk_id'yi çıkardık, veritabanı varsayılan değeri kullanacak.
 	query := `INSERT INTO inbound_routes (phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code) VALUES ($1, $2, $3, $4, $5, $6, $7)`
 	_, err := r.db.Exec(ctx, query,
-		route.PhoneNumber, route.TenantId, route.ActiveDialplanId,
-		route.OffHoursDialplanId, route.FailsafeDialplanId,
-		route.IsMaintenanceMode, route.DefaultLanguageCode,
+		route.PhoneNumber,
+		route.TenantId,
+		route.ActiveDialplanId,
+		route.OffHoursDialplanId,
+		route.FailsafeDialplanId,
+		route.IsMaintenanceMode,
+		route.DefaultLanguageCode,
 	)
 	return err
 }

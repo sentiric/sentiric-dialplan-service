@@ -1,3 +1,4 @@
+// DOSYANIN TAM VE DOĞRU HALİ
 package dialplan
 
 import (
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Arayüz (interface) orijinal, basit haline geri döndü.
 type Repository interface {
 	FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -279,11 +281,16 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 
 // --- Yardımcı Metodlar ---
 
+// Bu fonksiyon artık çok daha basit. Sadece repository'yi çağırıyor.
 func (s *Service) autoProvisionInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	guestPlan := "DP_GUEST_ENTRY"
 	newRoute := &dialplanv1.InboundRoute{
-		PhoneNumber: phoneNumber, TenantId: "system", ActiveDialplanId: &guestPlan, DefaultLanguageCode: "tr",
+		PhoneNumber:         phoneNumber,
+		TenantId:            "system",
+		ActiveDialplanId:    &guestPlan,
+		DefaultLanguageCode: "tr",
 	}
+	// DB şeması artık varsayılan trunk ID'sini kendi atayacak.
 	err := s.repo.CreateInboundRoute(ctx, newRoute)
 	return newRoute, err
 }
