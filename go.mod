@@ -8,7 +8,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/prometheus/client_golang v1.19.1
 	github.com/rs/zerolog v1.34.0
-	github.com/sentiric/sentiric-contracts v1.8.7
+	github.com/sentiric/sentiric-contracts v1.8.8
 	google.golang.org/grpc v1.75.0
 )
 

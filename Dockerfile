@@ -1,6 +1,11 @@
 # --- İNŞA AŞAMASI (DEBIAN TABANLI) ---
 FROM golang:1.24-bullseye AS builder
 
+# YENİ: Build argümanlarını build aşamasında kullanılabilir yap
+ARG GIT_COMMIT="unknown"
+ARG BUILD_DATE="unknown"
+ARG SERVICE_VERSION="0.0.0"
+
 # Git'i kur (gerekirse, özel modüller için)
 RUN apt-get update && apt-get install -y --no-install-recommends git
 
@@ -13,11 +18,10 @@ RUN go mod download
 # Tüm proje kaynak kodunu kopyala
 COPY . .
 
-# === DÜZELTME ===
-# Derleme komutuna main paketinin tam yolunu veriyoruz.
-# Eski Hali: RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/sentiric-dialplan-service .
-# Yeni Hali:
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/sentiric-dialplan-service ./cmd/dialplan-service
+# GÜNCELLEME: ldflags ile build-time değişkenlerini Go binary'sine göm
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE} -X main.ServiceVersion=${SERVICE_VERSION} -w -s" \
+    -o /app/bin/sentiric-dialplan-service ./cmd/dialplan-service
 
 # --- ÇALIŞTIRMA AŞAMASI (ALPINE) ---
 FROM alpine:latest
