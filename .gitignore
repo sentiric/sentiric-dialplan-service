@@ -17,4 +17,11 @@
 .DS_Store
 Thumbs.db
 
+# Ortam dosyaları
+!.env.example          # örnek config dosyasını tut
 .env
+
+
+# Çalışma zamanı veya geçici dosyalar
+.env.generated
+.profile.state

@@ -1,0 +1,44 @@
+# docker-compose.dev.yml
+# Service Geliştirme ortamı
+
+networks:
+  sentiric-net:
+    name: "${NETWORK_NAME:-sentiric-net}"
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET}
+          gateway: ${NETWORK_GATEWAY}
+  
+# volumes:
+  # [infra]: Temel Altyapı (Infrastructure Layer)
+  # --------------------------------------------------
+
+services:
+  # [core-service]: Çekirdek Servisler ve Kütüphaneler (Core Layer)
+  # -------------------------------------------------- 
+  dialplan-service:
+    image: ghcr.io/sentiric/sentiric-dialplan-service:${TAG:-latest}
+    env_file: ["${ENV_FILE_PATH}"]
+    volumes: 
+      - "${CONFIG_REPO_PATH}:/sentiric-config:ro"
+      - "${CERTIFICATES_REPO_PATH}:/sentiric-certificates:ro"
+      - "${ASSETS_REPO_PATH}:/sentiric-assets:ro"
+    ports: 
+      - "12020:${DIALPLAN_SERVICE_HTTP_PORT:-12020}"
+      - "12021:${DIALPLAN_SERVICE_GRPC_PORT:-12021}"
+      - "12022:${DIALPLAN_SERVICE_METRICS_PORT:-12022}"          
+    networks:
+      sentiric-net:
+        ipv4_address: ${DIALPLAN_SERVICE_IPV4_ADDRESS}       
+    restart: always
+    # depends_on: { 
+    #   postgres: { condition: service_healthy },
+    #   user-service: { condition: service_healthy }
+    # }
+    # healthcheck:
+    #   test: ["CMD", "nc", "-z", "localhost", "12020"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 5
+    #   start_period: 10s

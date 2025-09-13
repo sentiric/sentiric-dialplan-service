@@ -8,8 +8,8 @@ import (
 type Config struct {
 	Env    string `envconfig:"ENV" default:"development"`
 	Server struct {
-		GRPCPort    string `envconfig:"DIALPLAN_SERVICE_GRPC_PORT" default:"50054"`
-		MetricsPort string `envconfig:"METRICS_PORT" default:"9094"`
+		GRPCPort    string `envconfig:"DIALPLAN_SERVICE_GRPC_PORT" default:"12021"`
+		MetricsPort string `envconfig:"DIALPLAN_SERVICE_METRICS_PORT" default:"12022"`
 	}
 	Postgres struct {
 		URL string `envconfig:"POSTGRES_URL" required:"true"`
