@@ -32,13 +32,12 @@ services:
       sentiric-net:
         ipv4_address: ${DIALPLAN_SERVICE_IPV4_ADDRESS}       
     restart: always
-    # depends_on: { 
-    #   postgres: { condition: service_healthy },
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "12021"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s    
+    # depends_on: 
+    #   postgres: { condition: service_healthy }
     #   user-service: { condition: service_healthy }
-    # }
-    # healthcheck:
-    #   test: ["CMD", "nc", "-z", "localhost", "12020"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
-    #   start_period: 10s
