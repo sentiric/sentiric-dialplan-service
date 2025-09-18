@@ -23,7 +23,6 @@ import (
 	"github.com/sentiric/sentiric-dialplan-service/internal/service/dialplan"
 )
 
-// YENİ: ldflags ile doldurulacak değişkenler
 var (
 	ServiceVersion string
 	GitCommit      string
@@ -33,14 +32,15 @@ var (
 const serviceName = "dialplan-service"
 
 func main() {
-	log := logger.New(serviceName, os.Getenv("ENV"))
-
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Konfigürasyon yüklenemedi")
+		// Logger henüz başlatılmadığı için standart log kullanıyoruz.
+		fmt.Fprintf(os.Stderr, "Konfigürasyon yüklenemedi: %v\n", err)
+		os.Exit(1)
 	}
 
-	// YENİ: Başlangıçta versiyon bilgisini logla
+	log := logger.New(serviceName, cfg.Env)
+
 	log.Info().
 		Str("version", ServiceVersion).
 		Str("commit", GitCommit).

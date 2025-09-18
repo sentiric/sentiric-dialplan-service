@@ -19,7 +19,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Arayüz (interface) orijinal, basit haline geri döndü.
 type Repository interface {
 	FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -54,9 +53,7 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 	return userv1.NewUserServiceClient(conn), conn, nil
 }
 
-// --- Ana İş Mantığı
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-
 	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" {
@@ -124,8 +121,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}, nil
 }
 
-// --- CRUD Metodları ---
-
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	err := s.repo.CreateInboundRoute(ctx, route)
 	if err != nil {
@@ -177,17 +172,14 @@ func (s *Service) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInb
 		pageSize = 10
 	}
 	offset := (page - 1) * pageSize
-
 	total, err := s.repo.CountInboundRoutes(ctx, req.GetTenantId())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Route sayısı alınamadı: %v", err)
 	}
-
 	routes, err := s.repo.ListInboundRoutes(ctx, req.GetTenantId(), pageSize, offset)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Route'lar listelenemedi: %v", err)
 	}
-
 	return &dialplanv1.ListInboundRoutesResponse{Routes: routes, TotalCount: total}, nil
 }
 
@@ -196,12 +188,10 @@ func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDial
 	if dp == nil {
 		return status.Error(codes.InvalidArgument, "Dialplan nesnesi boş olamaz")
 	}
-
 	actionDataBytes, err := json.Marshal(dp.GetAction().GetActionData().GetData())
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
 	}
-
 	err = s.repo.CreateDialplan(ctx, dp, actionDataBytes)
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
@@ -213,7 +203,6 @@ func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDial
 }
 
 func (s *Service) GetDialplan(ctx context.Context, id string) (*dialplanv1.Dialplan, error) {
-
 	dp, err := s.repo.FindDialplanByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -229,12 +218,10 @@ func (s *Service) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDial
 	if dp == nil {
 		return status.Error(codes.InvalidArgument, "Dialplan nesnesi boş olamaz")
 	}
-
 	actionDataBytes, err := json.Marshal(dp.GetAction().GetActionData().GetData())
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
 	}
-
 	rowsAffected, err := s.repo.UpdateDialplan(ctx, dp, actionDataBytes)
 	if err != nil {
 		return status.Errorf(codes.Internal, "Dialplan güncellenemedi: %v", err)
@@ -246,7 +233,6 @@ func (s *Service) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDial
 }
 
 func (s *Service) DeleteDialplan(ctx context.Context, id string) error {
-
 	_, err := s.repo.DeleteDialplan(ctx, id)
 	if err != nil {
 		return status.Errorf(codes.Internal, "Dialplan silinemedi: %v", err)
@@ -255,7 +241,6 @@ func (s *Service) DeleteDialplan(ctx context.Context, id string) error {
 }
 
 func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
-
 	page := req.GetPage()
 	if page < 1 {
 		page = 1
@@ -265,32 +250,22 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 		pageSize = 10
 	}
 	offset := (page - 1) * pageSize
-
 	total, err := s.repo.CountDialplans(ctx, req.GetTenantId())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Dialplan sayısı alınamadı: %v", err)
 	}
-
 	dialplans, err := s.repo.ListDialplans(ctx, req.GetTenantId(), pageSize, offset)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Dialplan'lar listelenemedi: %v", err)
 	}
-
 	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
 }
 
-// --- Yardımcı Metodlar ---
-
-// Bu fonksiyon artık çok daha basit. Sadece repository'yi çağırıyor.
 func (s *Service) autoProvisionInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	guestPlan := "DP_GUEST_ENTRY"
 	newRoute := &dialplanv1.InboundRoute{
-		PhoneNumber:         phoneNumber,
-		TenantId:            "system",
-		ActiveDialplanId:    &guestPlan,
-		DefaultLanguageCode: "tr",
+		PhoneNumber: phoneNumber, TenantId: "system", ActiveDialplanId: &guestPlan, DefaultLanguageCode: "tr",
 	}
-	// DB şeması artık varsayılan trunk ID'sini kendi atayacak.
 	err := s.repo.CreateInboundRoute(ctx, newRoute)
 	return newRoute, err
 }
