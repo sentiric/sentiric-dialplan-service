@@ -1,9 +1,10 @@
+// sentiric-dialplan-service/cmd/dialplan-service/main.go
 package main
 
 import (
 	"fmt"
 	"net"
-	"net/http"
+	"net/http" // YENİ
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,7 +35,6 @@ const serviceName = "dialplan-service"
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		// Logger henüz başlatılmadığı için standart log kullanıyoruz.
 		fmt.Fprintf(os.Stderr, "Konfigürasyon yüklenemedi: %v\n", err)
 		os.Exit(1)
 	}
@@ -71,19 +71,39 @@ func main() {
 	}
 	dialplanv1.RegisterDialplanServiceServer(grpcServer, handler)
 	reflection.Register(grpcServer)
-
-	go startMetricsServer(log, cfg.Server.MetricsPort)
+	
+	// DEĞİŞİKLİK: startMetricsServer -> startHttpServer
+	go startHttpServer(log, cfg.Server.MetricsPort, cfg.Server.HttpPort)
 
 	startGRPCServer(log, cfg.Server.GRPCPort, grpcServer)
 
 	waitForShutdown(log, grpcServer)
 }
 
-func startMetricsServer(log zerolog.Logger, port string) {
-	http.Handle("/metrics", promhttp.Handler())
-	log.Info().Str("port", port).Msg("Metrics sunucusu dinleniyor")
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), nil); err != nil {
-		log.Error().Err(err).Msg("Metrics sunucusu başlatılamadı")
+// DEĞİŞİKLİK: Fonksiyonun adı ve içeriği güncellendi
+func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status": "ok"}`)
+	})
+	
+	// Metrik sunucusu
+	go func() {
+		metricsAddr := fmt.Sprintf(":%s", metricsPort)
+		log.Info().Str("port", metricsPort).Msg("Metrics sunucusu dinleniyor")
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Error().Err(err).Msg("Metrics sunucusu başlatılamadı")
+		}
+	}()
+
+	// Health check sunucusu
+	httpAddr := fmt.Sprintf(":%s", httpPort)
+	log.Info().Str("port", httpPort).Msg("HTTP sunucusu (health) dinleniyor")
+	if err := http.ListenAndServe(httpAddr, mux); err != nil {
+		log.Error().Err(err).Msg("HTTP sunucusu başlatılamadı")
 	}
 }
 

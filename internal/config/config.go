@@ -1,3 +1,4 @@
+// sentiric-dialplan-service/internal/config/config.go
 package config
 
 import (
@@ -8,6 +9,7 @@ import (
 type Config struct {
 	Env    string `envconfig:"ENV" default:"development"`
 	Server struct {
+		HttpPort    string `envconfig:"DIALPLAN_SERVICE_HTTP_PORT" default:"12020"` // YENİ ALAN
 		GRPCPort    string `envconfig:"DIALPLAN_SERVICE_GRPC_PORT" default:"12021"`
 		MetricsPort string `envconfig:"DIALPLAN_SERVICE_METRICS_PORT" default:"12022"`
 	}
