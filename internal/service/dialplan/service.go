@@ -1,10 +1,15 @@
-// DOSYANIN TAM VE DOĞRU HALİ
+// sentiric-dialplan-service/internal/service/dialplan/service.go
 package dialplan
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -12,13 +17,15 @@ import (
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 	"github.com/sentiric/sentiric-dialplan-service/internal/config"
-	platformgrpc "github.com/sentiric/sentiric-dialplan-service/internal/platform/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
+
+// Repository arayüzü aynı kalır
 type Repository interface {
 	FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -45,13 +52,39 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, log zerolo
 	return &Service{repo: repo, userClient: userClient, log: log}
 }
 
+// NewUserServiceClient, user-service için mTLS'li bir gRPC istemcisi oluşturur.
 func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServiceClient, *grpc.ClientConn, error) {
-	conn, err := platformgrpc.NewClientConnection(targetURL, "user-service", cfg)
+	clientCert, err := tls.LoadX509KeyPair(cfg.TLS.CertPath, cfg.TLS.KeyPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("istemci sertifikası yüklenemedi: %w", err)
+	}
+	caCert, err := os.ReadFile(cfg.TLS.CaPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("CA sertifikası okunamadı: %w", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, nil, fmt.Errorf("CA sertifikası havuza eklenemedi")
+	}
+
+	// URL'den ":port" kısmını çıkararak sunucu adını al
+	serverName := strings.Split(targetURL, ":")[0]
+
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		ServerName:   serverName, // Sertifika CN/SAN doğrulaması için
+	})
+
+	conn, err := grpc.NewClient(targetURL, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		return nil, nil, fmt.Errorf("user-service'e bağlanılamadı: %w", err)
 	}
 	return userv1.NewUserServiceClient(conn), conn, nil
 }
+
+// Geri kalan tüm service metodları (ResolveDialplan, CreateInboundRoute vb.) aynı kalır.
+// ... (Mevcut kodunuzu buraya yapıştırın) ...
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
@@ -66,17 +99,12 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 
 		if errors.Is(err, pgx.ErrNoRows) {
 			s.log.Info().Str("destination", destination).Msg("Route bulunamadı, kalıcı kayıt OLUŞTURULMAYACAK. Misafir planı geçici olarak döndürülüyor.")
-			// --- DEĞİŞİKLİK BURADA ---
-			// Veritabanına yazmak yerine, misafirler için standart bir "failsafe" yanıtı oluşturuyoruz.
-			// Bu, veritabanını temiz tutar ve güvenliği artırır.
 			guestRoute := &dialplanv1.InboundRoute{
 				PhoneNumber:         destination,
-				TenantId:            "system", // Varsayılan sistem tenant'ı
+				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
-			// `buildFailsafeResponse` zaten "DP_GUEST_ENTRY" planını bulup döndürecek.
 			return s.buildFailsafeResponse(ctx, "DP_GUEST_ENTRY", nil, nil, guestRoute)
-			// --- DEĞİŞİKLİK SONU ---
 		}
 		s.log.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
@@ -270,18 +298,6 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 	}
 	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
 }
-
-// DÜZELTME: autoProvisionInboundRoute fonksiyonunu SİLİYORUZ. Artık kullanılmayacak.
-/*
-func (s *Service) autoProvisionInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
-	guestPlan := "DP_GUEST_ENTRY"
-	newRoute := &dialplanv1.InboundRoute{
-		PhoneNumber: phoneNumber, TenantId: "system", ActiveDialplanId: &guestPlan, DefaultLanguageCode: "tr",
-	}
-	err := s.repo.CreateInboundRoute(ctx, newRoute)
-	return newRoute, err
-}
-*/
 
 func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	if planID == "" {

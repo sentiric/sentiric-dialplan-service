@@ -1,4 +1,4 @@
-// File: sentiric-dialplan-service/internal/repository/postgres/repository.go
+// sentiric-dialplan-service/internal/repository/postgres/repository.go
 package postgres
 
 import (

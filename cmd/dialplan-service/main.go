@@ -1,3 +1,4 @@
+// sentiric-dialplan-service/cmd/dialplan-service/main.go
 package main
 
 import (
@@ -15,10 +16,10 @@ import (
 
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	"github.com/sentiric/sentiric-dialplan-service/internal/config"
-	"github.com/sentiric/sentiric-dialplan-service/internal/platform/db"
-	platformgrpc "github.com/sentiric/sentiric-dialplan-service/internal/platform/grpc"
-	"github.com/sentiric/sentiric-dialplan-service/internal/platform/logger"
+	"github.com/sentiric/sentiric-dialplan-service/internal/database"
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 	"github.com/sentiric/sentiric-dialplan-service/internal/repository/postgres"
+	"github.com/sentiric/sentiric-dialplan-service/internal/server"
 	grpchandler "github.com/sentiric/sentiric-dialplan-service/internal/server/grpc"
 	"github.com/sentiric/sentiric-dialplan-service/internal/service/dialplan"
 )
@@ -47,7 +48,7 @@ func main() {
 		Str("profile", cfg.Env).
 		Msg("🚀 dialplan-service başlatılıyor...")
 
-	dbPool, err := db.NewConnection(cfg.DatabaseURL)
+	dbPool, err := database.NewConnection(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Veritabanı bağlantısı kurulamadı")
 	}
@@ -64,7 +65,7 @@ func main() {
 	dialplanSvc := dialplan.NewService(repo, userClient, log)
 	handler := grpchandler.NewHandler(dialplanSvc, log)
 
-	grpcServer, err := platformgrpc.NewServer(*cfg)
+	grpcServer, err := server.NewServer(*cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("gRPC sunucusu oluşturulamadı")
 	}
@@ -96,7 +97,7 @@ func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) {
 		}
 	}()
 
-	// Health check sunucusu (artık /metrics ile aynı sunucuda)
+	// Health check sunucusu
 	httpAddr := fmt.Sprintf(":%s", httpPort)
 	log.Info().Str("port", httpPort).Msg("HTTP sunucusu (health) dinleniyor")
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
@@ -125,5 +126,5 @@ func waitForShutdown(log zerolog.Logger, server *grpc.Server) {
 
 	log.Info().Msg("Servis kapatılıyor...")
 	server.GracefulStop()
-	log.Info().Msg("Servis başarıyla kapatıldı.")
+	log.Info().Msg("Servis başarıyla durduruldu.")
 }
