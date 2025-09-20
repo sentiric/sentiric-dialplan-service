@@ -2,12 +2,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -71,41 +73,38 @@ func main() {
 	}
 	dialplanv1.RegisterDialplanServiceServer(grpcServer, handler)
 	reflection.Register(grpcServer)
-	
-	go startHttpServer(log, cfg.Server.MetricsPort, cfg.Server.HttpPort)
+
+	httpServer := startHttpServer(log, cfg.Server.MetricsPort, cfg.Server.HttpPort)
 
 	startGRPCServer(log, cfg.Server.GRPCPort, grpcServer)
 
-	waitForShutdown(log, grpcServer)
+	waitForShutdown(log, grpcServer, httpServer)
 }
 
-func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) {
+func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status": "ok"}`)
 	})
-	
-	// Metrik sunucusu
+
+	// DEĞİŞİKLİK: İki ayrı sunucu başlatmak yerine tek bir sunucu ve mux kullanmak daha verimli.
+	// Metrik ve health endpoint'leri aynı porta taşındı (HTTP Port).
+	addr := fmt.Sprintf(":%s", httpPort)
+	srv := &http.Server{Addr: addr, Handler: mux}
+
 	go func() {
-		metricsAddr := fmt.Sprintf(":%s", metricsPort)
-		log.Info().Str("port", metricsPort).Msg("Metrics sunucusu dinleniyor")
-		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
-			log.Error().Err(err).Msg("Metrics sunucusu başlatılamadı")
+		log.Info().Str("port", httpPort).Msg("HTTP sunucusu (health & metrics) dinleniyor...")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("HTTP sunucusu başlatılamadı")
 		}
 	}()
-
-	// Health check sunucusu
-	httpAddr := fmt.Sprintf(":%s", httpPort)
-	log.Info().Str("port", httpPort).Msg("HTTP sunucusu (health) dinleniyor")
-	if err := http.ListenAndServe(httpAddr, mux); err != nil {
-		log.Error().Err(err).Msg("HTTP sunucusu başlatılamadı")
-	}
+	return srv
 }
 
-func startGRPCServer(log zerolog.Logger, port string, server *grpc.Server) {
+func startGRPCServer(log zerolog.Logger, port string, srv *grpc.Server) {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		log.Fatal().Err(err).Msg("gRPC portu dinlenemedi")
@@ -113,18 +112,32 @@ func startGRPCServer(log zerolog.Logger, port string, server *grpc.Server) {
 
 	go func() {
 		log.Info().Str("port", port).Msg("gRPC sunucusu dinleniyor")
-		if err := server.Serve(lis); err != nil {
+		if err := srv.Serve(lis); err != nil {
 			log.Fatal().Err(err).Msg("gRPC sunucusu başlatılamadı")
 		}
 	}()
 }
 
-func waitForShutdown(log zerolog.Logger, server *grpc.Server) {
+func waitForShutdown(log zerolog.Logger, grpcSrv *grpc.Server, httpSrv *http.Server) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info().Msg("Servis kapatılıyor...")
-	server.GracefulStop()
+	log.Warn().Msg("Kapatma sinyali alındı, servisler durduruluyor...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	log.Info().Msg("gRPC sunucusu durduruluyor...")
+	grpcSrv.GracefulStop()
+	log.Info().Msg("gRPC sunucusu durduruldu.")
+
+	log.Info().Msg("HTTP sunucusu durduruluyor...")
+	if err := httpSrv.Shutdown(ctx); err != nil {
+		log.Error().Err(err).Msg("HTTP sunucusu düzgün kapatılamadı.")
+	} else {
+		log.Info().Msg("HTTP sunucusu durduruldu.")
+	}
+
 	log.Info().Msg("Servis başarıyla durduruldu.")
 }
