@@ -67,6 +67,7 @@ func main() {
 	dialplanSvc := dialplan.NewService(repo, userClient, log)
 	handler := grpchandler.NewHandler(dialplanSvc, log)
 
+	// DEĞİŞİKLİK: Artık 'server' paketi üzerinden çağırıyoruz
 	grpcServer, err := server.NewServer(*cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("gRPC sunucusu oluşturulamadı")
@@ -74,14 +75,14 @@ func main() {
 	dialplanv1.RegisterDialplanServiceServer(grpcServer, handler)
 	reflection.Register(grpcServer)
 
-	httpServer := startHttpServer(log, cfg.Server.MetricsPort, cfg.Server.HttpPort)
+	httpServer := startHttpServer(log, cfg.Server.HttpPort)
 
 	startGRPCServer(log, cfg.Server.GRPCPort, grpcServer)
 
 	waitForShutdown(log, grpcServer, httpServer)
 }
 
-func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) *http.Server {
+func startHttpServer(log zerolog.Logger, port string) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -90,13 +91,11 @@ func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) *h
 		fmt.Fprintf(w, `{"status": "ok"}`)
 	})
 
-	// DEĞİŞİKLİK: İki ayrı sunucu başlatmak yerine tek bir sunucu ve mux kullanmak daha verimli.
-	// Metrik ve health endpoint'leri aynı porta taşındı (HTTP Port).
-	addr := fmt.Sprintf(":%s", httpPort)
+	addr := fmt.Sprintf(":%s", port)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
-		log.Info().Str("port", httpPort).Msg("HTTP sunucusu (health & metrics) dinleniyor...")
+		log.Info().Str("port", port).Msg("HTTP sunucusu (health & metrics) dinleniyor...")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal().Err(err).Msg("HTTP sunucusu başlatılamadı")
 		}
