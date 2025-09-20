@@ -1,10 +1,9 @@
-// sentiric-dialplan-service/cmd/dialplan-service/main.go
 package main
 
 import (
 	"fmt"
 	"net"
-	"net/http" // YENİ
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -39,7 +38,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// DÜZELTME: Logger artık dinamik olarak ENV ve LOG_LEVEL'i alıyor.
 	log := logger.New(serviceName, cfg.Env, cfg.LogLevel)
 
 	log.Info().
@@ -49,7 +47,7 @@ func main() {
 		Str("profile", cfg.Env).
 		Msg("🚀 dialplan-service başlatılıyor...")
 
-	dbPool, err := db.NewConnection(cfg.DatabaseURL) // Config'den doğru alanı kullan
+	dbPool, err := db.NewConnection(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Veritabanı bağlantısı kurulamadı")
 	}
@@ -57,9 +55,7 @@ func main() {
 
 	repo := postgres.NewRepository(dbPool, log)
 
-	// DÜZELTME: Config'den doğru alanı kullan
 	userClient, userConn, err := dialplan.NewUserServiceClient(cfg.UserServiceURL, *cfg)
-	
 	if err != nil {
 		log.Fatal().Err(err).Msg("User service istemcisi oluşturulamadı")
 	}
@@ -75,7 +71,6 @@ func main() {
 	dialplanv1.RegisterDialplanServiceServer(grpcServer, handler)
 	reflection.Register(grpcServer)
 	
-	// DEĞİŞİKLİK: startMetricsServer -> startHttpServer
 	go startHttpServer(log, cfg.Server.MetricsPort, cfg.Server.HttpPort)
 
 	startGRPCServer(log, cfg.Server.GRPCPort, grpcServer)
@@ -83,7 +78,6 @@ func main() {
 	waitForShutdown(log, grpcServer)
 }
 
-// DEĞİŞİKLİK: Fonksiyonun adı ve içeriği güncellendi
 func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -102,7 +96,7 @@ func startHttpServer(log zerolog.Logger, metricsPort string, httpPort string) {
 		}
 	}()
 
-	// Health check sunucusu
+	// Health check sunucusu (artık /metrics ile aynı sunucuda)
 	httpAddr := fmt.Sprintf(":%s", httpPort)
 	log.Info().Str("port", httpPort).Msg("HTTP sunucusu (health) dinleniyor")
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
