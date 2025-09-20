@@ -39,7 +39,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(serviceName, cfg.Env)
+	// DÜZELTME: Logger artık dinamik olarak ENV ve LOG_LEVEL'i alıyor.
+	log := logger.New(serviceName, cfg.Env, cfg.LogLevel)
 
 	log.Info().
 		Str("version", ServiceVersion).
@@ -48,7 +49,7 @@ func main() {
 		Str("profile", cfg.Env).
 		Msg("🚀 dialplan-service başlatılıyor...")
 
-	dbPool, err := db.NewConnection(cfg.Postgres.URL)
+	dbPool, err := db.NewConnection(cfg.DatabaseURL) // Config'den doğru alanı kullan
 	if err != nil {
 		log.Fatal().Err(err).Msg("Veritabanı bağlantısı kurulamadı")
 	}
@@ -56,7 +57,9 @@ func main() {
 
 	repo := postgres.NewRepository(dbPool, log)
 
-	userClient, userConn, err := dialplan.NewUserServiceClient(cfg.Clients.UserServiceURL, *cfg)
+	// DÜZELTME: Config'den doğru alanı kullan
+	userClient, userConn, err := dialplan.NewUserServiceClient(cfg.UserServiceURL, *cfg)
+	
 	if err != nil {
 		log.Fatal().Err(err).Msg("User service istemcisi oluşturulamadı")
 	}

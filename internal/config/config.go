@@ -1,37 +1,52 @@
-// sentiric-dialplan-service/internal/config/config.go
+// DOSYA: sentiric-dialplan-service/internal/config/config.go
+
 package config
 
 import (
 	"github.com/joho/godotenv"
-	"github.com/kelseyhightower/envconfig"
+	"github.com/rs/zerolog/log"
+	"os"
 )
 
 type Config struct {
-	Env    string `envconfig:"ENV" default:"development"`
-	Server struct {
-		HttpPort    string `envconfig:"DIALPLAN_SERVICE_HTTP_PORT" default:"12020"` // YENİ ALAN
-		GRPCPort    string `envconfig:"DIALPLAN_SERVICE_GRPC_PORT" default:"12021"`
-		MetricsPort string `envconfig:"DIALPLAN_SERVICE_METRICS_PORT" default:"12022"`
-	}
-	Postgres struct {
-		URL string `envconfig:"POSTGRES_URL" required:"true"`
-	}
-	Clients struct {
-		UserServiceURL string `envconfig:"USER_SERVICE_GRPC_URL" required:"true"`
-	}
-	TLS struct {
-		CertPath string `envconfig:"DIALPLAN_SERVICE_CERT_PATH" required:"true"`
-		KeyPath  string `envconfig:"DIALPLAN_SERVICE_KEY_PATH" required:"true"`
-		CAPath   string `envconfig:"GRPC_TLS_CA_PATH" required:"true"`
-	}
+	Env                string
+	LogLevel           string
+	GRPCPort           string
+	HttpPort           string
+	DatabaseURL        string
+	UserServiceURL     string
+	CertPath           string
+	KeyPath            string
+	CaPath             string
 }
 
 func Load() (*Config, error) {
 	_ = godotenv.Load()
-	var cfg Config
-	err := envconfig.Process("", &cfg)
-	if err != nil {
-		return nil, err
+
+	return &Config{
+		Env:            getEnv("ENV", "production"),
+		LogLevel:       getEnv("LOG_LEVEL", "info"),
+		GRPCPort:       getEnv("DIALPLAN_SERVICE_GRPC_PORT", "12021"),
+		HttpPort:       getEnv("DIALPLAN_SERVICE_HTTP_PORT", "12020"),
+		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),
+		UserServiceURL: getEnvOrFail("USER_SERVICE_GRPC_URL"),
+		CertPath:       getEnvOrFail("DIALPLAN_SERVICE_CERT_PATH"),
+		KeyPath:        getEnvOrFail("DIALPLAN_SERVICE_KEY_PATH"),
+		CaPath:         getEnvOrFail("GRPC_TLS_CA_PATH"),
+	}, nil
+}
+
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
 	}
-	return &cfg, nil
+	return fallback
+}
+
+func getEnvOrFail(key string) string {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		log.Fatal().Str("variable", key).Msg("Gerekli ortam değişkeni tanımlı değil")
+	}
+	return value
 }

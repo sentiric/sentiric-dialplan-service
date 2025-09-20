@@ -55,22 +55,32 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
+	
 	if err != nil {
+
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" {
 			s.log.Error().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı.")
 			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system"}
 			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, failsafeRoute)
 		}
+
 		if errors.Is(err, pgx.ErrNoRows) {
-			s.log.Info().Str("destination", destination).Msg("Route bulunamadı, auto-provisioning tetikleniyor.")
-			newRoute, provisionErr := s.autoProvisionInboundRoute(ctx, destination)
-			if provisionErr != nil {
-				return nil, status.Errorf(codes.Internal, "Auto-provisioning başarısız: %v", provisionErr)
+			s.log.Info().Str("destination", destination).Msg("Route bulunamadı, kalıcı kayıt OLUŞTURULMAYACAK. Misafir planı geçici olarak döndürülüyor.")
+			// --- DEĞİŞİKLİK BURADA ---
+			// Veritabanına yazmak yerine, misafirler için standart bir "failsafe" yanıtı oluşturuyoruz.
+			// Bu, veritabanını temiz tutar ve güvenliği artırır.
+			guestRoute := &dialplanv1.InboundRoute{
+				PhoneNumber:         destination,
+				TenantId:            "system", // Varsayılan sistem tenant'ı
+				DefaultLanguageCode: "tr",
 			}
-			return s.buildFailsafeResponse(ctx, "DP_GUEST_ENTRY", nil, nil, newRoute)
+			// `buildFailsafeResponse` zaten "DP_GUEST_ENTRY" planını bulup döndürecek.
+			return s.buildFailsafeResponse(ctx, "DP_GUEST_ENTRY", nil, nil, guestRoute)
+			// --- DEĞİŞİKLİK SONU ---
 		}
 		s.log.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
+	
 	}
 
 	if route.IsMaintenanceMode {
@@ -261,6 +271,8 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
 }
 
+// DÜZELTME: autoProvisionInboundRoute fonksiyonunu SİLİYORUZ. Artık kullanılmayacak.
+/*
 func (s *Service) autoProvisionInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	guestPlan := "DP_GUEST_ENTRY"
 	newRoute := &dialplanv1.InboundRoute{
@@ -269,6 +281,7 @@ func (s *Service) autoProvisionInboundRoute(ctx context.Context, phoneNumber str
 	err := s.repo.CreateInboundRoute(ctx, newRoute)
 	return newRoute, err
 }
+*/
 
 func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	if planID == "" {

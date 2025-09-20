@@ -5,7 +5,7 @@ go 1.24.5
 require (
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/joho/godotenv v1.5.1
-	github.com/kelseyhightower/envconfig v1.4.0
+	// github.com/kelseyhightower/envconfig v1.4.0 // BU SATIRI SİLİN
 	github.com/prometheus/client_golang v1.19.1
 	github.com/rs/zerolog v1.34.0
 	github.com/sentiric/sentiric-contracts v1.8.9
