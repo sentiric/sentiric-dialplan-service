@@ -21,7 +21,7 @@ import (
 	"github.com/sentiric/sentiric-dialplan-service/internal/database"
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 	"github.com/sentiric/sentiric-dialplan-service/internal/repository/postgres"
-	"github.com/sentiric/sentiric-dialplan-service/internal/server"
+	platformServer "github.com/sentiric/sentiric-dialplan-service/internal/server"
 	grpchandler "github.com/sentiric/sentiric-dialplan-service/internal/server/grpc"
 	"github.com/sentiric/sentiric-dialplan-service/internal/service/dialplan"
 )
@@ -67,8 +67,8 @@ func main() {
 	dialplanSvc := dialplan.NewService(repo, userClient, log)
 	handler := grpchandler.NewHandler(dialplanSvc, log)
 
-	// DEĞİŞİKLİK: Artık 'server' paketi üzerinden çağırıyoruz
-	grpcServer, err := server.NewServer(*cfg)
+	// DEĞİŞİKLİK: Artık 'platformServer' paketi üzerinden çağırıyoruz
+	grpcServer, err := platformServer.NewServer(*cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("gRPC sunucusu oluşturulamadı")
 	}
