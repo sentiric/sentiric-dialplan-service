@@ -28,7 +28,7 @@ type Config struct {
 	Env            string
 	LogLevel       string
 	DatabaseURL    string
-	UserServiceURL string
+	UserServiceURL string // Bu alan, TARGET URL'i tutacak
 	Server         ServerConfig
 	TLS            TLSConfig
 }
@@ -40,10 +40,15 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Env:            getEnv("ENV", "production"),
-		LogLevel:       getEnv("LOG_LEVEL", "info"),
-		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),
-		UserServiceURL: getEnvOrFail("USER_SERVICE_GRPC_URL"),
+		Env:         getEnv("ENV", "production"),
+		LogLevel:    getEnv("LOG_LEVEL", "info"),
+		DatabaseURL: getEnvOrFail("POSTGRES_URL"),
+
+		// --- KRİTİK DEĞİŞİKLİK BURADA ---
+		// Artık `user-service` için özel olarak tanımlanmış HEDEF URL'ini okuyoruz.
+		UserServiceURL: getEnvOrFail("USER_SERVICE_TARGET_GRPC_URL"),
+		// --- DEĞİŞİKLİK SONA ERDİ ---
+
 		Server: ServerConfig{
 			HttpPort:    getEnv("DIALPLAN_SERVICE_HTTP_PORT", "12020"),
 			GRPCPort:    getEnv("DIALPLAN_SERVICE_GRPC_PORT", "12021"),
