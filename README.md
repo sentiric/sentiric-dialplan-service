@@ -33,9 +33,9 @@
 
 ## 🚀 Yerel Geliştirme
 
-1.  **Bağımlılıkları Yükleyin:** `go mod tidy`
-2.  **Ortam Değişkenlerini Ayarlayın:** `.env.docker`'ı `.env` olarak kopyalayın ve `POSTGRES_URL` ile `USER_SERVICE_GRPC_URL`'nin doğru olduğundan emin olun.
-3.  **Servisi Çalıştırın:** `go run cmd/dialplan-service/main.go`
+1.  **Bağımlılıkları Yükleyin:**
+2.  **Ortam Değişkenlerini Ayarlayın:** `.env.example` dosyasını `.env` olarak kopyalayın ve gerekli değişkenleri doldurun.
+3.  **Servisi Çalıştırın:**
 
 ## 🤝 Katkıda Bulunma
 
