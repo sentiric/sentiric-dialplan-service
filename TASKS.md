@@ -1,26 +1,8 @@
-### **`sentiric-dialplan-service/TASKS.md` (Güncellenmiş Hali)**
+# 🗺️ Sentiric Dialplan Service - Görev Listesi
 
-# 🗺️ Sentiric Dialplan Service - Geliştirme Yol Haritası (v4.0)
+Bu servisin mevcut ve gelecekteki tüm geliştirme görevleri, platformun merkezi görev yönetimi reposu olan **`sentiric-tasks`**'ta yönetilmektedir.
 
-Bu belge, `dialplan-service`'in geliştirme görevlerini projenin genel fazlarına uygun olarak listeler.
+➡️ **[Aktif Görev Panosuna Git](https://github.com/sentiric/sentiric-tasks/blob/main/TASKS.md)**
 
 ---
-
-### **Gelecek Fazlar: Akıllı ve Dinamik Yönlendirme**
-
-**Amaç:** Çağrı yönlendirme kararlarını statik kuralların ötesine taşıyarak daha dinamik ve "akıllı" hale getirmek.
-
--   [ ] **Görev ID: DP-002 - Zamana Dayalı Yönlendirme (Mesai Saatleri)**
-    -   **Durum:** ⬜ **Planlandı**
-    -   **Açıklama:** Çağrının geldiği saate ve güne göre farklı planların tetiklenmesini sağla.
-    -   **Kabul Kriterleri:**
-        -   [ ] `inbound_routes` tablosuna `off_hours_dialplan_id` alanı eklenmeli.
-        -   [ ] `tenants` tablosuna `working_hours` (örn: "Mon-Fri 09:00-18:00") ve `timezone` alanları eklenmeli.
-        -   [ ] `ResolveDialplan` mantığı, çağrı zamanını kiracının zaman dilimine göre kontrol ederek `active_dialplan_id` veya `off_hours_dialplan_id` arasında seçim yapmalı.
-
--   [ ] **Görev ID: DP-003 - Harici Veriye Dayalı Yönlendirme (Tatil Takvimi)**
-    -   **Durum:** ⬜ **Planlandı**
-    -   **Açıklama:** Resmi tatil günlerinde otomatik olarak "tatil anonsu" dialplan'ini tetikleyecek bir mantık ekle.
-    -   **Kabul Kriterleri:**
-        -   [ ] `dialplan-service`, `connectors-service` (henüz yok) veya harici bir takvim API'si ile entegre olabilmeli.
-        -   [ ] Çağrı geldiğinde, o günün tatil olup olmadığını kontrol etmeli ve eğer tatilse özel bir `holiday_dialplan_id`'yi tetiklemeli.
+Bu belge, servise özel, çok küçük ve acil görevler için geçici bir not defteri olarak kullanılabilir.
