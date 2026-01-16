@@ -67,8 +67,17 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 		return nil, nil, fmt.Errorf("CA sertifikası havuza eklenemedi")
 	}
 
+	// [FIX] URL Normalizasyonu
+	cleanTarget := targetURL
+	if strings.Contains(targetURL, "://") {
+		parts := strings.Split(targetURL, "://")
+		if len(parts) > 1 {
+			cleanTarget = parts[1]
+		}
+	}
+
 	// URL'den ":port" kısmını çıkararak sunucu adını al
-	serverName := strings.Split(targetURL, ":")[0]
+	serverName := strings.Split(cleanTarget, ":")[0]
 
 	creds := credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{clientCert},
@@ -76,7 +85,7 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 		ServerName:   serverName, // Sertifika CN/SAN doğrulaması için
 	})
 
-	conn, err := grpc.NewClient(targetURL, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(cleanTarget, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, nil, fmt.Errorf("user-service'e bağlanılamadı: %w", err)
 	}
