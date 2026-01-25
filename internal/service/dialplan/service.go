@@ -24,8 +24,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-
-// Repository arayüzü aynı kalır
 type Repository interface {
 	FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -33,7 +31,6 @@ type Repository interface {
 	DeleteInboundRoute(ctx context.Context, phoneNumber string) (int64, error)
 	ListInboundRoutes(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.InboundRoute, error)
 	CountInboundRoutes(ctx context.Context, tenantID string) (int32, error)
-
 	FindDialplanByID(ctx context.Context, id string) (*dialplanv1.Dialplan, error)
 	CreateDialplan(ctx context.Context, dp *dialplanv1.Dialplan, actionDataBytes []byte) error
 	UpdateDialplan(ctx context.Context, dp *dialplanv1.Dialplan, actionDataBytes []byte) (int64, error)
@@ -52,7 +49,6 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, log zerolo
 	return &Service{repo: repo, userClient: userClient, log: log}
 }
 
-// NewUserServiceClient, user-service için mTLS'li bir gRPC istemcisi oluşturur.
 func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServiceClient, *grpc.ClientConn, error) {
 	clientCert, err := tls.LoadX509KeyPair(cfg.TLS.CertPath, cfg.TLS.KeyPath)
 	if err != nil {
@@ -67,7 +63,6 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 		return nil, nil, fmt.Errorf("CA sertifikası havuza eklenemedi")
 	}
 
-	// [FIX] URL Normalizasyonu
 	cleanTarget := targetURL
 	if strings.Contains(targetURL, "://") {
 		parts := strings.Split(targetURL, "://")
@@ -76,13 +71,12 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 		}
 	}
 
-	// URL'den ":port" kısmını çıkararak sunucu adını al
 	serverName := strings.Split(cleanTarget, ":")[0]
 
 	creds := credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
-		ServerName:   serverName, // Sertifika CN/SAN doğrulaması için
+		ServerName:   serverName,
 	})
 
 	conn, err := grpc.NewClient(cleanTarget, grpc.WithTransportCredentials(creds))
@@ -92,20 +86,14 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 	return userv1.NewUserServiceClient(conn), conn, nil
 }
 
-// Geri kalan tüm service metodları (ResolveDialplan, CreateInboundRoute vb.) aynı kalır.
-// ... (Mevcut kodunuzu buraya yapıştırın) ...
-
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
-	
 	if err != nil {
-
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" {
 			s.log.Error().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı.")
 			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system"}
 			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, failsafeRoute)
 		}
-
 		if errors.Is(err, pgx.ErrNoRows) {
 			s.log.Info().Str("destination", destination).Msg("Route bulunamadı, kalıcı kayıt OLUŞTURULMAYACAK. Misafir planı geçici olarak döndürülüyor.")
 			guestRoute := &dialplanv1.InboundRoute{
@@ -113,11 +101,12 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
-			return s.buildFailsafeResponse(ctx, "DP_GUEST_ENTRY", nil, nil, guestRoute)
+			// --- DÜZELTME BURADA ---
+			// Hardcoded ID veritabanındaki doğru ID ile değiştirildi.
+			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_WELCOME_GUEST", nil, nil, guestRoute)
 		}
 		s.log.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
-	
 	}
 
 	if route.IsMaintenanceMode {
@@ -134,13 +123,15 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
 	userRes, err := s.userClient.FindUserByContact(userReqCtx, &userv1.FindUserByContactRequest{
-		ContactType: "phone", ContactValue: caller,
+		ContactType:  "phone",
+		ContactValue: caller,
 	})
 	if err != nil {
 		st, _ := status.FromError(err)
 		if st.Code() == codes.NotFound {
 			s.log.Info().Str("caller", caller).Msg("Arayan bulunamadı, misafir planına yönlendiriliyor.")
-			return s.buildFailsafeResponse(ctx, "DP_GUEST_ENTRY", nil, nil, route)
+			// --- DÜZELTME BURADA ---
+			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_WELCOME_GUEST", nil, nil, route)
 		}
 		s.log.Error().Err(err).Msg("User service ile iletişim kurulamadı, failsafe planına yönlendiriliyor.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
@@ -163,8 +154,12 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 
 	return &dialplanv1.ResolveDialplanResponse{
-		DialplanId: plan.Id, TenantId: plan.TenantId, Action: plan.Action,
-		MatchedUser: matchedUser, MatchedContact: matchedContact, InboundRoute: route,
+		DialplanId:     plan.Id,
+		TenantId:       plan.TenantId,
+		Action:         plan.Action,
+		MatchedUser:    matchedUser,
+		MatchedContact: matchedContact,
+		InboundRoute:   route,
 	}, nil
 }
 
