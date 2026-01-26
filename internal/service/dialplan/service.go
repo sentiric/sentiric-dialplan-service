@@ -11,8 +11,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
@@ -22,6 +20,14 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+)
+
+// Consts for Magic Strings
+const (
+	DialplanSystemFailsafe     = "DP_SYSTEM_FAILSAFE"
+	DialplanSystemWelcomeGuest = "DP_SYSTEM_WELCOME_GUEST"
+	ActionPlayAnnouncement     = "PLAY_ANNOUNCEMENT"
+	AnnouncementSystemError    = "ANNOUNCE_SYSTEM_ERROR"
 )
 
 type Repository interface {
@@ -89,21 +95,19 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
 	if err != nil {
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P01" {
-			s.log.Error().Err(err).Msg("Kritik 'inbound_routes' tablosu bulunamadı.")
+		if errors.Is(err, ErrTableMissing) {
+			s.log.Error().Msg("Kritik Altyapı Hatası: Tablolar eksik.")
 			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system"}
-			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_FAILSAFE", nil, nil, failsafeRoute)
+			return s.buildFailsafeResponse(ctx, DialplanSystemFailsafe, nil, nil, failsafeRoute)
 		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			s.log.Info().Str("destination", destination).Msg("Route bulunamadı, kalıcı kayıt OLUŞTURULMAYACAK. Misafir planı geçici olarak döndürülüyor.")
+		if errors.Is(err, ErrNotFound) {
+			s.log.Info().Str("destination", destination).Msg("Route bulunamadı. Misafir planı geçici olarak döndürülüyor.")
 			guestRoute := &dialplanv1.InboundRoute{
 				PhoneNumber:         destination,
 				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
-			// --- DÜZELTME BURADA ---
-			// Hardcoded ID veritabanındaki doğru ID ile değiştirildi.
-			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_WELCOME_GUEST", nil, nil, guestRoute)
+			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
 		s.log.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
@@ -114,6 +118,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
+	// Trace ID Propagation
 	md, _ := metadata.FromIncomingContext(ctx)
 	traceIDValues := md.Get("x-trace-id")
 	traceID := "unknown"
@@ -122,6 +127,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
+	// User Identification
 	userRes, err := s.userClient.FindUserByContact(userReqCtx, &userv1.FindUserByContactRequest{
 		ContactType:  "phone",
 		ContactValue: caller,
@@ -130,8 +136,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		st, _ := status.FromError(err)
 		if st.Code() == codes.NotFound {
 			s.log.Info().Str("caller", caller).Msg("Arayan bulunamadı, misafir planına yönlendiriliyor.")
-			// --- DÜZELTME BURADA ---
-			return s.buildFailsafeResponse(ctx, "DP_SYSTEM_WELCOME_GUEST", nil, nil, route)
+			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, route)
 		}
 		s.log.Error().Err(err).Msg("User service ile iletişim kurulamadı, failsafe planına yönlendiriliyor.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
@@ -166,7 +171,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	err := s.repo.CreateInboundRoute(ctx, route)
 	if err != nil {
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+		if errors.Is(err, ErrConflict) {
 			return status.Errorf(codes.AlreadyExists, "Bu telefon numarası zaten kayıtlı: %s", route.PhoneNumber)
 		}
 		return status.Errorf(codes.Internal, "Inbound route oluşturulamadı: %v", err)
@@ -177,7 +182,7 @@ func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.Inbo
 func (s *Service) GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	route, err := s.repo.FindInboundRouteByPhone(ctx, phoneNumber)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNotFound) {
 			return nil, status.Errorf(codes.NotFound, "Inbound route bulunamadı: %s", phoneNumber)
 		}
 		return nil, status.Errorf(codes.Internal, "Inbound route alınamadı: %v", err)
@@ -236,7 +241,7 @@ func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDial
 	}
 	err = s.repo.CreateDialplan(ctx, dp, actionDataBytes)
 	if err != nil {
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+		if errors.Is(err, ErrConflict) {
 			return status.Errorf(codes.AlreadyExists, "Bu dialplan ID zaten kayıtlı: %s", dp.Id)
 		}
 		return status.Errorf(codes.Internal, "Dialplan oluşturulamadı: %v", err)
@@ -247,7 +252,7 @@ func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDial
 func (s *Service) GetDialplan(ctx context.Context, id string) (*dialplanv1.Dialplan, error) {
 	dp, err := s.repo.FindDialplanByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNotFound) {
 			return nil, status.Errorf(codes.NotFound, "Dialplan bulunamadı: %s", id)
 		}
 		return nil, status.Errorf(codes.Internal, "Dialplan alınamadı: %v", err)
@@ -305,17 +310,26 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 
 func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	if planID == "" {
-		planID = "DP_SYSTEM_FAILSAFE"
+		planID = DialplanSystemFailsafe
 	}
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
-		s.log.Error().Err(err).Str("plan_id", planID).Msg("KRİTİK HATA: Failsafe dialplan dahi bulunamadı!")
+		s.log.Error().Err(err).Str("plan_id", planID).Msg("KRİTİK HATA: Failsafe dialplan veritabanından çekilemedi!")
+		
+		// ULTIMATE FAILSAFE: Veritabanı yoksa bile cevap ver.
+		// Bu yapı hardcoded olarak bellekte yaşar, DB gerektirmez.
+		emergencyPlan := &dialplanv1.DialplanAction{
+			Action: ActionPlayAnnouncement,
+			ActionData: &dialplanv1.ActionData{
+				Data: map[string]string{"announcement_id": AnnouncementSystemError},
+			},
+		}
+		
 		return &dialplanv1.ResolveDialplanResponse{
-			DialplanId: "ULTIMATE_FAILSAFE", TenantId: "system",
-			Action: &dialplanv1.DialplanAction{
-				Action:     "PLAY_ANNOUNCEMENT",
-				ActionData: &dialplanv1.ActionData{Data: map[string]string{"announcement_id": "ANNOUNCE_SYSTEM_ERROR"}},
-			}, InboundRoute: route,
+			DialplanId: "EMERGENCY_MODE", 
+			TenantId:   "system",
+			Action:     emergencyPlan, 
+			InboundRoute: route,
 		}, nil
 	}
 	return &dialplanv1.ResolveDialplanResponse{
