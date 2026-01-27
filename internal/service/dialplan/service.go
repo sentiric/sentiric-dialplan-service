@@ -14,7 +14,9 @@ import (
 	"github.com/rs/zerolog"
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
+	"github.com/sentiric/sentiric-dialplan-service/internal/cache"
 	"github.com/sentiric/sentiric-dialplan-service/internal/config"
+	grpchelper "github.com/sentiric/sentiric-dialplan-service/internal/grpc" // Imports package grpchelper
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -48,11 +50,13 @@ type Repository interface {
 type Service struct {
 	repo       Repository
 	userClient userv1.UserServiceClient
+	userCache  *cache.UserCache // ✅ EKLENDİ
 	log        zerolog.Logger
 }
 
-func NewService(repo Repository, userClient userv1.UserServiceClient, log zerolog.Logger) *Service {
-	return &Service{repo: repo, userClient: userClient, log: log}
+// ✅ GÜNCELLEME: NewService artık UserCache kabul ediyor
+func NewService(repo Repository, userClient userv1.UserServiceClient, userCache *cache.UserCache, log zerolog.Logger) *Service {
+	return &Service{repo: repo, userClient: userClient, userCache: userCache, log: log}
 }
 
 func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServiceClient, *grpc.ClientConn, error) {
@@ -94,6 +98,7 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
+	// ... (route error handling aynı)
 	if err != nil {
 		if errors.Is(err, ErrTableMissing) {
 			s.log.Error().Msg("Kritik Altyapı Hatası: Tablolar eksik.")
@@ -128,26 +133,57 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
 	// User Identification
-	userRes, err := s.userClient.FindUserByContact(userReqCtx, &userv1.FindUserByContactRequest{
-		ContactType:  "phone",
-		ContactValue: caller,
-	})
-	if err != nil {
-		st, _ := status.FromError(err)
-		if st.Code() == codes.NotFound {
-			s.log.Info().Str("caller", caller).Msg("Arayan bulunamadı, misafir planına yönlendiriliyor.")
-			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, route)
+	// ✅ EKLENDİ: Cache Kontrolü
+	var matchedUser *userv1.User
+	var userErr error
+
+	// 1. Önce Cache'e bak
+	if s.userCache != nil {
+		matchedUser, userErr = s.userCache.GetUser(ctx, caller)
+		if userErr != nil {
+			s.log.Warn().Err(userErr).Msg("UserCache okuma hatası (ihmal ediliyor)")
 		}
-		s.log.Error().Err(err).Msg("User service ile iletişim kurulamadı, failsafe planına yönlendiriliyor.")
-		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
-	matchedUser := userRes.GetUser()
+	// 2. Cache miss ise Service'e git
+	if matchedUser == nil {
+		// ✅ GÜNCELLEME: Timeout Helper Kullanımı
+		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
+			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
+				ContactType:  "phone",
+				ContactValue: caller,
+			}, opts...)
+		}
+
+		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
+		if err != nil {
+			st, _ := status.FromError(err)
+			if st.Code() == codes.NotFound {
+				s.log.Info().Str("caller", caller).Msg("Arayan bulunamadı, misafir planına yönlendiriliyor.")
+				return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, route)
+			}
+			s.log.Error().Err(err).Msg("User service ile iletişim kurulamadı, failsafe planına yönlendiriliyor.")
+			return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
+		}
+		matchedUser = userRes.GetUser()
+
+		// 3. Cache'e yaz
+		if s.userCache != nil && matchedUser != nil {
+			if err := s.userCache.SetUser(ctx, caller, matchedUser); err != nil {
+				s.log.Warn().Err(err).Msg("UserCache yazma hatası")
+			}
+		}
+	} else {
+		s.log.Info().Str("caller", caller).Msg("✅ Kullanıcı cache'den bulundu")
+	}
+
 	var matchedContact *userv1.Contact
-	for _, c := range matchedUser.Contacts {
-		if c.ContactValue == caller {
-			matchedContact = c
-			break
+	if matchedUser != nil {
+		for _, c := range matchedUser.Contacts {
+			if c.ContactValue == caller {
+				matchedContact = c
+				break
+			}
 		}
 	}
 
@@ -315,7 +351,7 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
 		s.log.Error().Err(err).Str("plan_id", planID).Msg("KRİTİK HATA: Failsafe dialplan veritabanından çekilemedi!")
-		
+
 		// ULTIMATE FAILSAFE: Veritabanı yoksa bile cevap ver.
 		// Bu yapı hardcoded olarak bellekte yaşar, DB gerektirmez.
 		emergencyPlan := &dialplanv1.DialplanAction{
@@ -324,11 +360,11 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user
 				Data: map[string]string{"announcement_id": AnnouncementSystemError},
 			},
 		}
-		
+
 		return &dialplanv1.ResolveDialplanResponse{
-			DialplanId: "EMERGENCY_MODE", 
-			TenantId:   "system",
-			Action:     emergencyPlan, 
+			DialplanId:   "EMERGENCY_MODE",
+			TenantId:     "system",
+			Action:       emergencyPlan,
 			InboundRoute: route,
 		}, nil
 	}

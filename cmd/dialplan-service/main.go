@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
+
 	"github.com/sentiric/sentiric-dialplan-service/internal/config"
 	"github.com/sentiric/sentiric-dialplan-service/internal/database"
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
@@ -24,6 +26,9 @@ import (
 	platformServer "github.com/sentiric/sentiric-dialplan-service/internal/server"
 	grpchandler "github.com/sentiric/sentiric-dialplan-service/internal/server/grpc"
 	"github.com/sentiric/sentiric-dialplan-service/internal/service/dialplan"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/sentiric/sentiric-dialplan-service/internal/cache"
 )
 
 var (
@@ -64,7 +69,25 @@ func main() {
 	}
 	defer userConn.Close()
 
-	dialplanSvc := dialplan.NewService(repo, userClient, log)
+	// ✅ Redis Bağlantısı ve UserCache
+	redisOpts, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Geçersiz Redis URL")
+	}
+	redisClient := redis.NewClient(redisOpts)
+	defer redisClient.Close()
+
+	// Redis Ping testi
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Error().Err(err).Msg("Redis bağlantısı başarısız, cache devre dışı kalabilir")
+	} else {
+		log.Info().Str("url", cfg.RedisURL).Msg("✅ Redis bağlantısı sağlandı")
+	}
+
+	userCache := cache.NewUserCache(redisClient)
+
+	// Updated NewService call
+	dialplanSvc := dialplan.NewService(repo, userClient, userCache, log)
 	handler := grpchandler.NewHandler(dialplanSvc, log)
 
 	// DEĞİŞİKLİK: Artık 'platformServer' paketi üzerinden çağırıyoruz

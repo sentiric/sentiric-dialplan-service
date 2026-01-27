@@ -29,6 +29,7 @@ type Config struct {
 	LogLevel       string
 	DatabaseURL    string
 	UserServiceURL string // Bu alan, TARGET URL'i tutacak
+	RedisURL       string // ✅ EKLENDİ: Redis Cache URL
 	Server         ServerConfig
 	TLS            TLSConfig
 }
@@ -47,6 +48,8 @@ func Load() (*Config, error) {
 		// --- KRİTİK DEĞİŞİKLİK BURADA ---
 		// Artık `user-service` için özel olarak tanımlanmış HEDEF URL'ini okuyoruz.
 		UserServiceURL: getEnvOrFail("USER_SERVICE_TARGET_GRPC_URL"),
+
+		RedisURL: getEnv("REDIS_URL", "redis://redis:6379"), // Cache için Redis
 		// --- DEĞİŞİKLİK SONA ERDİ ---
 
 		Server: ServerConfig{
