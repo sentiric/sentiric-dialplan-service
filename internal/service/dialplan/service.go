@@ -97,8 +97,26 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 }
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	route, err := s.repo.FindInboundRouteByPhone(ctx, destination)
-	// ... (route error handling aynı)
+	// --- YENİ EKLENEN MANTIK: SIP URI PARSE ---
+	// Gelen 'destination' (örn: "sip:2002@34.122.40.122;transport=udp" veya "2002@34.122.40.122")
+	// formatından sadece "2002" kısmını ayıkla.
+	cleanDestination := destination
+	if strings.Contains(cleanDestination, "@") {
+		parts := strings.Split(cleanDestination, "@")
+		userPart := parts[0]
+		if strings.Contains(userPart, ":") {
+			// "sip:" ön ekini kaldır
+			uriParts := strings.Split(userPart, ":")
+			cleanDestination = uriParts[len(uriParts)-1]
+		} else {
+			cleanDestination = userPart
+		}
+	}
+	s.log.Info().Str("original_dest", destination).Str("clean_dest", cleanDestination).Msg("Destination number parsed")
+	// --- YENİ MANTIK SONU ---
+
+	// Veritabanı sorgusunda artık temizlenmiş hedefi kullanıyoruz.
+	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrTableMissing) {
 			s.log.Error().Msg("Kritik Altyapı Hatası: Tablolar eksik.")
@@ -106,7 +124,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			return s.buildFailsafeResponse(ctx, DialplanSystemFailsafe, nil, nil, failsafeRoute)
 		}
 		if errors.Is(err, ErrNotFound) {
-			s.log.Info().Str("destination", destination).Msg("Route bulunamadı. Misafir planı geçici olarak döndürülüyor.")
+			s.log.Info().Str("destination", cleanDestination).Msg("Route bulunamadı. Misafir planı geçici olarak döndürülüyor.")
 			guestRoute := &dialplanv1.InboundRoute{
 				PhoneNumber:         destination,
 				TenantId:            "system",
@@ -119,7 +137,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 
 	if route.IsMaintenanceMode {
-		s.log.Info().Str("destination", destination).Msg("Hat bakım modunda, failsafe planına yönlendiriliyor.")
+		s.log.Info().Str("destination", cleanDestination).Msg("Hat bakım modunda, failsafe planına yönlendiriliyor.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
@@ -132,12 +150,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
-	// User Identification
-	// ✅ EKLENDİ: Cache Kontrolü
+	// User Identification (Cache ile)
 	var matchedUser *userv1.User
 	var userErr error
 
-	// 1. Önce Cache'e bak
 	if s.userCache != nil {
 		matchedUser, userErr = s.userCache.GetUser(ctx, caller)
 		if userErr != nil {
@@ -145,9 +161,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// 2. Cache miss ise Service'e git
 	if matchedUser == nil {
-		// ✅ GÜNCELLEME: Timeout Helper Kullanımı
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
 				ContactType:  "phone",
@@ -167,7 +181,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 		matchedUser = userRes.GetUser()
 
-		// 3. Cache'e yaz
 		if s.userCache != nil && matchedUser != nil {
 			if err := s.userCache.SetUser(ctx, caller, matchedUser); err != nil {
 				s.log.Warn().Err(err).Msg("UserCache yazma hatası")
