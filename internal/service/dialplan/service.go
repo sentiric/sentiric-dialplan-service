@@ -16,7 +16,7 @@ import (
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 	"github.com/sentiric/sentiric-dialplan-service/internal/cache"
 	"github.com/sentiric/sentiric-dialplan-service/internal/config"
-	grpchelper "github.com/sentiric/sentiric-dialplan-service/internal/grpc" // Imports package grpchelper
+	grpchelper "github.com/sentiric/sentiric-dialplan-service/internal/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -32,6 +32,7 @@ const (
 	AnnouncementSystemError    = "ANNOUNCE_SYSTEM_ERROR"
 )
 
+// Repository Interface
 type Repository interface {
 	FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -39,6 +40,7 @@ type Repository interface {
 	DeleteInboundRoute(ctx context.Context, phoneNumber string) (int64, error)
 	ListInboundRoutes(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.InboundRoute, error)
 	CountInboundRoutes(ctx context.Context, tenantID string) (int32, error)
+
 	FindDialplanByID(ctx context.Context, id string) (*dialplanv1.Dialplan, error)
 	CreateDialplan(ctx context.Context, dp *dialplanv1.Dialplan, actionDataBytes []byte) error
 	UpdateDialplan(ctx context.Context, dp *dialplanv1.Dialplan, actionDataBytes []byte) (int64, error)
@@ -47,18 +49,20 @@ type Repository interface {
 	CountDialplans(ctx context.Context, tenantID string) (int32, error)
 }
 
+// Service Struct
 type Service struct {
 	repo       Repository
 	userClient userv1.UserServiceClient
-	userCache  *cache.UserCache // ✅ EKLENDİ
+	userCache  *cache.UserCache
 	log        zerolog.Logger
 }
 
-// ✅ GÜNCELLEME: NewService artık UserCache kabul ediyor
+// NewService Constructor
 func NewService(repo Repository, userClient userv1.UserServiceClient, userCache *cache.UserCache, log zerolog.Logger) *Service {
 	return &Service{repo: repo, userClient: userClient, userCache: userCache, log: log}
 }
 
+// Helper: NewUserServiceClient
 func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServiceClient, *grpc.ClientConn, error) {
 	clientCert, err := tls.LoadX509KeyPair(cfg.TLS.CertPath, cfg.TLS.KeyPath)
 	if err != nil {
@@ -96,26 +100,22 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 	return userv1.NewUserServiceClient(conn), conn, nil
 }
 
+// --- CORE LOGIC: RESOLVE DIALPLAN ---
+
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	// --- YENİ EKLENEN MANTIK: SIP URI PARSE ---
-	// Gelen 'destination' (örn: "sip:2002@34.122.40.122;transport=udp" veya "2002@34.122.40.122")
-	// formatından sadece "2002" kısmını ayıkla.
 	cleanDestination := destination
 	if strings.Contains(cleanDestination, "@") {
 		parts := strings.Split(cleanDestination, "@")
 		userPart := parts[0]
 		if strings.Contains(userPart, ":") {
-			// "sip:" ön ekini kaldır
 			uriParts := strings.Split(userPart, ":")
 			cleanDestination = uriParts[len(uriParts)-1]
 		} else {
 			cleanDestination = userPart
 		}
 	}
-	s.log.Info().Str("original_dest", destination).Str("clean_dest", cleanDestination).Msg("Destination number parsed")
-	// --- YENİ MANTIK SONU ---
+	s.log.Info().Str("original_dest", destination).Str("clean_dest", cleanDestination).Msg("Destination parsed")
 
-	// Veritabanı sorgusunda artık temizlenmiş hedefi kullanıyoruz.
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrTableMissing) {
@@ -141,7 +141,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
-	// Trace ID Propagation
 	md, _ := metadata.FromIncomingContext(ctx)
 	traceIDValues := md.Get("x-trace-id")
 	traceID := "unknown"
@@ -150,7 +149,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
-	// User Identification (Cache ile)
 	var matchedUser *userv1.User
 	var userErr error
 
@@ -217,6 +215,8 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}, nil
 }
 
+// --- CRUD: INBOUND ROUTES ---
+
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	err := s.repo.CreateInboundRoute(ctx, route)
 	if err != nil {
@@ -279,15 +279,25 @@ func (s *Service) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInb
 	return &dialplanv1.ListInboundRoutesResponse{Routes: routes, TotalCount: total}, nil
 }
 
+// --- CRUD: DIALPLANS ---
+
 func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) error {
 	dp := req.GetDialplan()
 	if dp == nil {
 		return status.Error(codes.InvalidArgument, "Dialplan nesnesi boş olamaz")
 	}
-	actionDataBytes, err := json.Marshal(dp.GetAction().GetActionData().GetData())
-	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
+	// ActionData (Map) -> JSON Bytes dönüşümü
+	var actionDataBytes []byte
+	var err error
+	if dp.GetAction() != nil && dp.GetAction().GetActionData() != nil {
+		actionDataBytes, err = json.Marshal(dp.GetAction().GetActionData().GetData())
+		if err != nil {
+			return status.Errorf(codes.InvalidArgument, "Geçersiz action_data formatı: %v", err)
+		}
+	} else {
+		actionDataBytes = []byte("{}")
 	}
+
 	err = s.repo.CreateDialplan(ctx, dp, actionDataBytes)
 	if err != nil {
 		if errors.Is(err, ErrConflict) {
@@ -314,10 +324,18 @@ func (s *Service) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDial
 	if dp == nil {
 		return status.Error(codes.InvalidArgument, "Dialplan nesnesi boş olamaz")
 	}
-	actionDataBytes, err := json.Marshal(dp.GetAction().GetActionData().GetData())
-	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
+
+	var actionDataBytes []byte
+	var err error
+	if dp.GetAction() != nil && dp.GetAction().GetActionData() != nil {
+		actionDataBytes, err = json.Marshal(dp.GetAction().GetActionData().GetData())
+		if err != nil {
+			return status.Errorf(codes.InvalidArgument, "Geçersiz action_data: %v", err)
+		}
+	} else {
+		actionDataBytes = []byte("{}")
 	}
+
 	rowsAffected, err := s.repo.UpdateDialplan(ctx, dp, actionDataBytes)
 	if err != nil {
 		return status.Errorf(codes.Internal, "Dialplan güncellenemedi: %v", err)
@@ -357,6 +375,7 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
 }
 
+// Helper: buildFailsafeResponse
 func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	if planID == "" {
 		planID = DialplanSystemFailsafe
@@ -365,8 +384,6 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user
 	if err != nil {
 		s.log.Error().Err(err).Str("plan_id", planID).Msg("KRİTİK HATA: Failsafe dialplan veritabanından çekilemedi!")
 
-		// ULTIMATE FAILSAFE: Veritabanı yoksa bile cevap ver.
-		// Bu yapı hardcoded olarak bellekte yaşar, DB gerektirmez.
 		emergencyPlan := &dialplanv1.DialplanAction{
 			Action: ActionPlayAnnouncement,
 			ActionData: &dialplanv1.ActionData{

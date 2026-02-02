@@ -90,7 +90,7 @@ func main() {
 	dialplanSvc := dialplan.NewService(repo, userClient, userCache, log)
 	handler := grpchandler.NewHandler(dialplanSvc, log)
 
-	// DEĞİŞİKLİK: Artık 'platformServer' paketi üzerinden çağırıyoruz
+	// gRPC Server Oluşturma
 	grpcServer, err := platformServer.NewServer(*cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("gRPC sunucusu oluşturulamadı")
@@ -98,12 +98,15 @@ func main() {
 	dialplanv1.RegisterDialplanServiceServer(grpcServer, handler)
 	reflection.Register(grpcServer)
 
+	// Yardımcı fonksiyonları çağır
 	httpServer := startHttpServer(log, cfg.Server.HttpPort)
-
 	startGRPCServer(log, cfg.Server.GRPCPort, grpcServer)
 
+	// Shutdown sinyalini bekle
 	waitForShutdown(log, grpcServer, httpServer)
 }
+
+// --- YARDIMCI FONKSİYONLAR (EKLENDİ) ---
 
 func startHttpServer(log zerolog.Logger, port string) *http.Server {
 	mux := http.NewServeMux()

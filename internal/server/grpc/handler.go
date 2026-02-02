@@ -10,8 +10,10 @@ import (
 )
 
 // Service arayüzü, handler'ın service katmanından ne beklediğini tanımlar.
+// service.go'daki metodlarla birebir uyuşmalıdır.
 type Service interface {
 	ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error)
+
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
 	GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	UpdateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -21,7 +23,6 @@ type Service interface {
 	CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) error
 	GetDialplan(ctx context.Context, id string) (*dialplanv1.Dialplan, error)
 	UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDialplanRequest) error
-
 	DeleteDialplan(ctx context.Context, id string) error
 	ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error)
 }
@@ -36,12 +37,14 @@ func NewHandler(svc Service, log zerolog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
-// ResolveDialplan ve InboundRoute handler'ları aynı kalacak
+// --- Resolve & Inbound Route Handlers ---
+
 func (h *Handler) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	h.log.Info().Str("method", "ResolveDialplan").Msg("gRPC isteği alındı.")
 	return h.svc.ResolveDialplan(ctx, req.GetCallerContactValue(), req.GetDestinationNumber())
 }
+
 func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.CreateInboundRouteRequest) (*dialplanv1.CreateInboundRouteResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	err := h.svc.CreateInboundRoute(ctx, req.GetRoute())
@@ -50,6 +53,7 @@ func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.Create
 	}
 	return &dialplanv1.CreateInboundRouteResponse{Route: req.GetRoute()}, nil
 }
+
 func (h *Handler) GetInboundRoute(ctx context.Context, req *dialplanv1.GetInboundRouteRequest) (*dialplanv1.GetInboundRouteResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	route, err := h.svc.GetInboundRoute(ctx, req.GetPhoneNumber())
@@ -58,6 +62,7 @@ func (h *Handler) GetInboundRoute(ctx context.Context, req *dialplanv1.GetInboun
 	}
 	return &dialplanv1.GetInboundRouteResponse{Route: route}, nil
 }
+
 func (h *Handler) UpdateInboundRoute(ctx context.Context, req *dialplanv1.UpdateInboundRouteRequest) (*dialplanv1.UpdateInboundRouteResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	err := h.svc.UpdateInboundRoute(ctx, req.GetRoute())
@@ -66,6 +71,7 @@ func (h *Handler) UpdateInboundRoute(ctx context.Context, req *dialplanv1.Update
 	}
 	return &dialplanv1.UpdateInboundRouteResponse{Route: req.GetRoute()}, nil
 }
+
 func (h *Handler) DeleteInboundRoute(ctx context.Context, req *dialplanv1.DeleteInboundRouteRequest) (*dialplanv1.DeleteInboundRouteResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	err := h.svc.DeleteInboundRoute(ctx, req.GetPhoneNumber())
@@ -74,12 +80,14 @@ func (h *Handler) DeleteInboundRoute(ctx context.Context, req *dialplanv1.Delete
 	}
 	return &dialplanv1.DeleteInboundRouteResponse{Success: true}, nil
 }
+
 func (h *Handler) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInboundRoutesRequest) (*dialplanv1.ListInboundRoutesResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	return h.svc.ListInboundRoutes(ctx, req)
 }
 
 // --- Dialplan Handlers ---
+
 func (h *Handler) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) (*dialplanv1.CreateDialplanResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	err := h.svc.CreateDialplan(ctx, req)
@@ -108,7 +116,6 @@ func (h *Handler) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDial
 }
 
 func (h *Handler) DeleteDialplan(ctx context.Context, req *dialplanv1.DeleteDialplanRequest) (*dialplanv1.DeleteDialplanResponse, error) {
-
 	ctx = h.propagateTrace(ctx)
 	err := h.svc.DeleteDialplan(ctx, req.GetId())
 	if err != nil {
@@ -116,13 +123,14 @@ func (h *Handler) DeleteDialplan(ctx context.Context, req *dialplanv1.DeleteDial
 	}
 	return &dialplanv1.DeleteDialplanResponse{Success: true}, nil
 }
-func (h *Handler) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
 
+func (h *Handler) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
 	ctx = h.propagateTrace(ctx)
 	return h.svc.ListDialplans(ctx, req)
 }
-func (h *Handler) propagateTrace(ctx context.Context) context.Context {
 
+// Trace ID'yi metadata'dan okuyup yeni context'e ekler
+func (h *Handler) propagateTrace(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	traceID := "unknown"
 	if ok {

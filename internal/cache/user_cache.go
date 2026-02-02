@@ -28,7 +28,7 @@ func NewUserCache(redisClient *redis.Client) *UserCache {
 // Returns nil if not found (cache miss)
 func (c *UserCache) GetUser(ctx context.Context, phoneNumber string) (*userv1.User, error) {
 	key := fmt.Sprintf("user:phone:%s", phoneNumber)
-	
+
 	val, err := c.redis.Get(ctx, key).Result()
 	if err == redis.Nil {
 		// Cache miss
@@ -38,13 +38,13 @@ func (c *UserCache) GetUser(ctx context.Context, phoneNumber string) (*userv1.Us
 		log.Error().Err(err).Str("phone", phoneNumber).Msg("Redis read error")
 		return nil, err
 	}
-	
+
 	var user userv1.User
 	if err := json.Unmarshal([]byte(val), &user); err != nil {
 		log.Error().Err(err).Msg("Failed to unmarshal cached user")
 		return nil, err
 	}
-	
+
 	log.Debug().Str("phone", phoneNumber).Msg("✅ Cache HIT")
 	return &user, nil
 }
@@ -52,17 +52,17 @@ func (c *UserCache) GetUser(ctx context.Context, phoneNumber string) (*userv1.Us
 // SetUser stores user in cache with TTL
 func (c *UserCache) SetUser(ctx context.Context, phoneNumber string, user *userv1.User) error {
 	key := fmt.Sprintf("user:phone:%s", phoneNumber)
-	
+
 	data, err := json.Marshal(user)
 	if err != nil {
 		return fmt.Errorf("failed to marshal user: %w", err)
 	}
-	
+
 	if err := c.redis.Set(ctx, key, data, UserCacheTTL).Err(); err != nil {
 		log.Error().Err(err).Str("phone", phoneNumber).Msg("Redis write error")
 		return err
 	}
-	
+
 	log.Debug().Str("phone", phoneNumber).Dur("ttl", UserCacheTTL).Msg("✅ User cached")
 	return nil
 }
