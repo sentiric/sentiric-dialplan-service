@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/rs/zerolog"
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
@@ -103,44 +104,63 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 // --- CORE LOGIC: RESOLVE DIALPLAN ---
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	cleanDestination := destination
-	if strings.Contains(cleanDestination, "@") {
-		parts := strings.Split(cleanDestination, "@")
-		userPart := parts[0]
-		if strings.Contains(userPart, ":") {
-			uriParts := strings.Split(userPart, ":")
-			cleanDestination = uriParts[len(uriParts)-1]
-		} else {
-			cleanDestination = userPart
-		}
-	}
-	s.log.Info().Str("original_dest", destination).Str("clean_dest", cleanDestination).Msg("Destination parsed")
+	// 1. Hedef Numarayı Temizle (SIP URI -> Saf Numara)
+	rawDestination := extractUserPart(destination)
 
+	// 2. Numarayı Normalize Et (+90 -> 90)
+	cleanDestination := normalizePhoneNumber(rawDestination)
+
+	s.log.Info().
+		Str("raw_dest", destination).
+		Str("extracted", rawDestination).
+		Str("normalized", cleanDestination).
+		Str("caller", caller).
+		Msg("📞 ResolveDialplan İsteği İşleniyor")
+
+	// 3. Veritabanından Rotayı Bul
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrTableMissing) {
-			s.log.Error().Msg("Kritik Altyapı Hatası: Tablolar eksik.")
+			s.log.Error().Msg("🚨 Kritik Altyapı Hatası: Tablolar eksik.")
 			failsafeRoute := &dialplanv1.InboundRoute{TenantId: "system"}
 			return s.buildFailsafeResponse(ctx, DialplanSystemFailsafe, nil, nil, failsafeRoute)
 		}
 		if errors.Is(err, ErrNotFound) {
-			s.log.Info().Str("destination", cleanDestination).Msg("Route bulunamadı. Misafir planı geçici olarak döndürülüyor.")
+			s.log.Warn().Str("destination", cleanDestination).Msg("🚫 Route bulunamadı. Varsayılan Misafir (Guest) akışına yönlendiriliyor.")
+
+			// Bilinmeyen numaralar için varsayılan bir route oluştur (Sanal)
 			guestRoute := &dialplanv1.InboundRoute{
-				PhoneNumber:         destination,
+				PhoneNumber:         cleanDestination,
 				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
+			// Route yoksa doğrudan Misafir Karşılamaya git
 			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
 		s.log.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
+	// 4. Bakım Modu Kontrolü
 	if route.IsMaintenanceMode {
-		s.log.Info().Str("destination", cleanDestination).Msg("Hat bakım modunda, failsafe planına yönlendiriliyor.")
+		s.log.Info().Str("destination", cleanDestination).Msg("🚧 Hat bakım modunda. Failsafe planı devreye giriyor.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
+	// 5. [KRİTİK GÜNCELLEME] Öncelikli Plan Kontrolü (Public Service Check)
+	// Eğer numaraya atanmış açık bir "Aktif Plan" varsa (örn: Echo Test, IVR),
+	// kullanıcıyı tanımamıza gerek yoktur. Önce planı yükleyelim.
+	var activePlan *dialplanv1.Dialplan
+	if route.ActiveDialplanId != nil {
+		p, err := s.repo.FindDialplanByID(ctx, *route.ActiveDialplanId)
+		if err == nil {
+			activePlan = p
+			s.log.Info().Str("plan_id", p.Id).Str("action", p.Action.Action).Msg("✅ Aktif Plan Bulundu.")
+		}
+	}
+
+	// 6. Kullanıcı Tanıma (User Identification)
+	// Trace ID'yi taşı
 	md, _ := metadata.FromIncomingContext(ctx)
 	traceIDValues := md.Get("x-trace-id")
 	traceID := "unknown"
@@ -150,8 +170,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
 	var matchedUser *userv1.User
+	var matchedContact *userv1.Contact
 	var userErr error
 
+	// A. Cache Kontrolü
 	if s.userCache != nil {
 		matchedUser, userErr = s.userCache.GetUser(ctx, caller)
 		if userErr != nil {
@@ -159,6 +181,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
+	// B. User Service Çağrısı (Cache Miss ise)
 	if matchedUser == nil {
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
@@ -171,53 +194,69 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		if err != nil {
 			st, _ := status.FromError(err)
 			if st.Code() == codes.NotFound {
-				s.log.Info().Str("caller", caller).Msg("Arayan bulunamadı, misafir planına yönlendiriliyor.")
-				return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, route)
+				s.log.Info().Str("caller", caller).Msg("👤 Arayan sistemde kayıtlı değil (Anonymous).")
+			} else {
+				s.log.Error().Err(err).Msg("User service erişim hatası.")
 			}
-			s.log.Error().Err(err).Msg("User service ile iletişim kurulamadı, failsafe planına yönlendiriliyor.")
-			return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
-		}
-		matchedUser = userRes.GetUser()
-
-		if s.userCache != nil && matchedUser != nil {
-			if err := s.userCache.SetUser(ctx, caller, matchedUser); err != nil {
-				s.log.Warn().Err(err).Msg("UserCache yazma hatası")
+		} else {
+			matchedUser = userRes.GetUser()
+			// Cache'e yaz
+			if s.userCache != nil && matchedUser != nil {
+				_ = s.userCache.SetUser(ctx, caller, matchedUser)
 			}
 		}
 	} else {
 		s.log.Info().Str("caller", caller).Msg("✅ Kullanıcı cache'den bulundu")
 	}
 
-	var matchedContact *userv1.Contact
-	if matchedUser != nil {
-		for _, c := range matchedUser.Contacts {
-			if c.ContactValue == caller {
-				matchedContact = c
-				break
+	// 7. Karar Mantığı (Decision Matrix)
+
+	// DURUM A: Hedef numara için özel bir plan (Active Plan) VAR.
+	// Örn: 9999 (Echo), 8001 (Demo Bot).
+	// Bu durumda kullanıcıyı tanımasak bile bu planı işletmeliyiz.
+	if activePlan != nil {
+		if matchedUser == nil {
+			// Kullanıcı yoksa sahte bir "Misafir" kullanıcı oluştur ki akış bozulmasın.
+			matchedUser = &userv1.User{
+				Id:       "anonymous",
+				Name:     toPtr("Misafir Kullanıcı"),
+				TenantId: route.TenantId,
+				UserType: "caller",
 			}
+			s.log.Info().Msg("Genel servis (Public Service) için geçici kullanıcı atandı.")
 		}
+
+		// Eğer kullanıcı bulunduysa da zaten matchedUser dolu.
+		return &dialplanv1.ResolveDialplanResponse{
+			DialplanId:     activePlan.Id,
+			TenantId:       activePlan.TenantId,
+			Action:         activePlan.Action,
+			MatchedUser:    matchedUser,
+			MatchedContact: matchedContact,
+			InboundRoute:   route,
+		}, nil
 	}
 
-	s.log.Info().Str("user_id", matchedUser.Id).Msg("Kullanıcı bulundu, aktif plana yönlendiriliyor.")
-	plan, err := s.repo.FindDialplanByID(ctx, safeString(route.ActiveDialplanId))
-	if err != nil {
-		s.log.Error().Err(err).Str("plan_id", safeString(route.ActiveDialplanId)).Msg("Aktif plan bulunamadı, failsafe tetikleniyor.")
-		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), matchedUser, matchedContact, route)
+	// DURUM B: Hedef numara için özel plan YOK ama kullanıcı TANINIYOR.
+	// Örn: VIP müşteriye özel yönlendirme yapılabilir.
+	if matchedUser != nil {
+		s.log.Info().Str("user_id", matchedUser.Id).Msg("Kullanıcı tanındı ama özel rota yok, varsayılan AI sohbetine yönlendiriliyor.")
+		// Burada kullanıcının Tenant'ına özel bir karşılama planı aranabilir.
+		// Şimdilik sistem varsayılanına yönlendiriyoruz.
+		return s.buildFailsafeResponse(ctx, "DP_DEMO_MAIN_ENTRY", matchedUser, matchedContact, route)
 	}
 
-	return &dialplanv1.ResolveDialplanResponse{
-		DialplanId:     plan.Id,
-		TenantId:       plan.TenantId,
-		Action:         plan.Action,
-		MatchedUser:    matchedUser,
-		MatchedContact: matchedContact,
-		InboundRoute:   route,
-	}, nil
+	// DURUM C: Ne plan var ne de kullanıcı tanınıyor.
+	// Misafir karşılama akışına git.
+	s.log.Info().Msg("Ne rota ne de kullanıcı eşleşti. Misafir akışı başlatılıyor.")
+	return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, route)
 }
 
 // --- CRUD: INBOUND ROUTES ---
 
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
+	// Normalizasyon
+	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	err := s.repo.CreateInboundRoute(ctx, route)
 	if err != nil {
 		if errors.Is(err, ErrConflict) {
@@ -229,10 +268,11 @@ func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.Inbo
 }
 
 func (s *Service) GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
-	route, err := s.repo.FindInboundRouteByPhone(ctx, phoneNumber)
+	normPhone := normalizePhoneNumber(phoneNumber)
+	route, err := s.repo.FindInboundRouteByPhone(ctx, normPhone)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, status.Errorf(codes.NotFound, "Inbound route bulunamadı: %s", phoneNumber)
+			return nil, status.Errorf(codes.NotFound, "Inbound route bulunamadı: %s", normPhone)
 		}
 		return nil, status.Errorf(codes.Internal, "Inbound route alınamadı: %v", err)
 	}
@@ -240,6 +280,7 @@ func (s *Service) GetInboundRoute(ctx context.Context, phoneNumber string) (*dia
 }
 
 func (s *Service) UpdateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
+	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	rowsAffected, err := s.repo.UpdateInboundRoute(ctx, route)
 	if err != nil {
 		return status.Errorf(codes.Internal, "Inbound route güncellenemedi: %v", err)
@@ -251,7 +292,8 @@ func (s *Service) UpdateInboundRoute(ctx context.Context, route *dialplanv1.Inbo
 }
 
 func (s *Service) DeleteInboundRoute(ctx context.Context, phoneNumber string) error {
-	_, err := s.repo.DeleteInboundRoute(ctx, phoneNumber)
+	normPhone := normalizePhoneNumber(phoneNumber)
+	_, err := s.repo.DeleteInboundRoute(ctx, normPhone)
 	if err != nil {
 		return status.Errorf(codes.Internal, "Inbound route silinemedi: %v", err)
 	}
@@ -375,7 +417,8 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
 }
 
-// Helper: buildFailsafeResponse
+// --- HELPER FUNCTIONS ---
+
 func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	if planID == "" {
 		planID = DialplanSystemFailsafe
@@ -384,6 +427,7 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user
 	if err != nil {
 		s.log.Error().Err(err).Str("plan_id", planID).Msg("KRİTİK HATA: Failsafe dialplan veritabanından çekilemedi!")
 
+		// Veritabanı bile çöktüyse statik bir acil durum planı dön
 		emergencyPlan := &dialplanv1.DialplanAction{
 			Action: ActionPlayAnnouncement,
 			ActionData: &dialplanv1.ActionData{
@@ -409,4 +453,71 @@ func safeString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func toPtr(s string) *string {
+	return &s
+}
+
+// extractUserPart: SIP URI'den kullanıcı kısmını çıkarır (örn: sip:1001@domain -> 1001)
+func extractUserPart(uri string) string {
+	clean := uri
+	// "sip:" veya "sips:" öneki varsa kaldır
+	if strings.HasPrefix(clean, "sip:") {
+		clean = clean[4:]
+	} else if strings.HasPrefix(clean, "sips:") {
+		clean = clean[5:]
+	}
+
+	// "@" varsa öncesini al
+	if idx := strings.Index(clean, "@"); idx != -1 {
+		clean = clean[:idx]
+	}
+
+	// ":" varsa (port) ve @ yoksa, temizle (örn: 1001:5060)
+	// Dikkat: @'den sonraki port zaten yukarıda atıldı.
+	// Bu durum sadece saf "1001:5060" gibi durumlarda geçerli.
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		clean = clean[:idx]
+	}
+
+	return clean
+}
+
+// normalizePhoneNumber: Telefon numarasını veritabanı formatına (genellikle 90...) çevirir.
+// "+90555..." -> "90555..."
+// "0555..." -> "90555..." (Varsayım: Türkiye)
+// "555..." -> "90555..." (Varsayım: Türkiye)
+func normalizePhoneNumber(phone string) string {
+	// Sadece rakamları al
+	var sb strings.Builder
+	for _, ch := range phone {
+		if unicode.IsDigit(ch) {
+			sb.WriteRune(ch)
+		}
+	}
+	cleaned := sb.String()
+
+	// Eğer boşsa olduğu gibi dön (Hata üst katmanda yakalanır)
+	if cleaned == "" {
+		return phone
+	}
+
+	// 1. Durum: 90 ile başlıyorsa (12 hane) -> Tamam
+	if len(cleaned) == 12 && strings.HasPrefix(cleaned, "90") {
+		return cleaned
+	}
+
+	// 2. Durum: 0 ile başlıyorsa (11 hane - 0555...) -> 90 ekle, 0'ı at
+	if len(cleaned) == 11 && strings.HasPrefix(cleaned, "0") {
+		return "90" + cleaned[1:]
+	}
+
+	// 3. Durum: 10 hane (555...) -> Başına 90 ekle
+	if len(cleaned) == 10 {
+		return "90" + cleaned
+	}
+
+	// Diğer durumlar (Örn: Kısa numara 9999, 1001) -> Dokunma
+	return cleaned
 }
