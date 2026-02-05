@@ -104,7 +104,7 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 // --- CORE LOGIC: RESOLVE DIALPLAN ---
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	// [ARCHITECTURAL DECISION: UES 1.0] EDGE SANITIZATION
+	// [ARCHITECTURAL FIX: UES 2.0] ROBUST SANITIZATION
 	// 1. Hedef Numarayı Temizle (Route bulmak için)
 	rawDestination := extractUserPart(destination)
 	cleanDestination := normalizePhoneNumber(rawDestination)
@@ -130,29 +130,22 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 		if errors.Is(err, ErrNotFound) {
 			s.log.Warn().Str("destination", cleanDestination).Msg("🚫 Route bulunamadı. Varsayılan Misafir (Guest) akışına yönlendiriliyor.")
-
-			// Bilinmeyen numaralar için varsayılan bir route oluştur (Sanal)
 			guestRoute := &dialplanv1.InboundRoute{
 				PhoneNumber:         cleanDestination,
 				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
-			// Route yoksa doğrudan Misafir Karşılamaya git
 			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
 		s.log.Error().Err(err).Msg("Inbound route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
-	// 4. Bakım Modu Kontrolü
 	if route.IsMaintenanceMode {
 		s.log.Info().Str("destination", cleanDestination).Msg("🚧 Hat bakım modunda. Failsafe planı devreye giriyor.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
-	// 5. Öncelikli Plan Kontrolü (Public Service Check)
-	// Eğer numaraya atanmış açık bir "Aktif Plan" varsa (örn: Echo Test, IVR),
-	// kullanıcıyı tanımamıza gerek yoktur. Önce planı yükleyelim.
 	var activePlan *dialplanv1.Dialplan
 	if route.ActiveDialplanId != nil {
 		p, err := s.repo.FindDialplanByID(ctx, *route.ActiveDialplanId)
@@ -162,8 +155,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// 6. Kullanıcı Tanıma (User Identification)
-	// Trace ID'yi taşı
 	md, _ := metadata.FromIncomingContext(ctx)
 	traceIDValues := md.Get("x-trace-id")
 	traceID := "unknown"
@@ -176,7 +167,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	var matchedContact *userv1.Contact
 	var userErr error
 
-	// A. Cache Kontrolü (Temizlenmiş numara ile)
 	if s.userCache != nil {
 		matchedUser, userErr = s.userCache.GetUser(ctx, cleanCaller)
 		if userErr != nil {
@@ -184,12 +174,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// B. User Service Çağrısı (Cache Miss ise)
 	if matchedUser == nil {
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
-				ContactType: "phone",
-				// BURASI KRİTİK: Temizlenmiş 'cleanCaller' gönderiyoruz.
+				ContactType:  "phone",
 				ContactValue: cleanCaller,
 			}, opts...)
 		}
@@ -204,7 +192,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}
 		} else {
 			matchedUser = userRes.GetUser()
-			// Cache'e yaz
 			if s.userCache != nil && matchedUser != nil {
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser)
 			}
@@ -213,13 +200,8 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		s.log.Info().Str("caller", cleanCaller).Msg("✅ Kullanıcı cache'den bulundu")
 	}
 
-	// 7. Karar Mantığı (Decision Matrix)
-
-	// DURUM A: Hedef numara için özel bir plan (Active Plan) VAR.
-	// Örn: 9999 (Echo), 8001 (Demo Bot).
 	if activePlan != nil {
 		if matchedUser == nil {
-			// Kullanıcı yoksa sahte bir "Misafir" kullanıcı oluştur ki akış bozulmasın.
 			matchedUser = &userv1.User{
 				Id:       "anonymous",
 				Name:     toPtr("Misafir Kullanıcı"),
@@ -239,14 +221,11 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}, nil
 	}
 
-	// DURUM B: Hedef numara için özel plan YOK ama kullanıcı TANINIYOR.
 	if matchedUser != nil {
 		s.log.Info().Str("user_id", matchedUser.Id).Msg("Kullanıcı tanındı ama özel rota yok, varsayılan AI sohbetine yönlendiriliyor.")
-		// Şimdilik sistem varsayılanına yönlendiriyoruz.
 		return s.buildFailsafeResponse(ctx, "DP_DEMO_MAIN_ENTRY", matchedUser, matchedContact, route)
 	}
 
-	// DURUM C: Ne plan var ne de kullanıcı tanınıyor.
 	s.log.Info().Msg("Ne rota ne de kullanıcı eşleşti. Misafir akışı başlatılıyor.")
 	return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, route)
 }
@@ -254,7 +233,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 // --- CRUD: INBOUND ROUTES ---
 
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
-	// Normalizasyon (Write Path)
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	err := s.repo.CreateInboundRoute(ctx, route)
 	if err != nil {
@@ -424,15 +402,12 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
 		s.log.Error().Err(err).Str("plan_id", planID).Msg("KRİTİK HATA: Failsafe dialplan veritabanından çekilemedi!")
-
-		// Veritabanı bile çöktüyse statik bir acil durum planı dön
 		emergencyPlan := &dialplanv1.DialplanAction{
 			Action: ActionPlayAnnouncement,
 			ActionData: &dialplanv1.ActionData{
 				Data: map[string]string{"announcement_id": AnnouncementSystemError},
 			},
 		}
-
 		return &dialplanv1.ResolveDialplanResponse{
 			DialplanId:   "EMERGENCY_MODE",
 			TenantId:     "system",
@@ -457,37 +432,45 @@ func toPtr(s string) *string {
 	return &s
 }
 
-// extractUserPart: SIP URI'den kullanıcı kısmını çıkarır (örn: sip:1001@domain -> 1001)
-func extractUserPart(uri string) string {
-	clean := uri
-	// "sip:" veya "sips:" öneki varsa kaldır
-	if strings.HasPrefix(clean, "sip:") {
-		clean = clean[4:]
-	} else if strings.HasPrefix(clean, "sips:") {
-		clean = clean[5:]
+// [CRITICAL FIX] Robust URI/AOR parsing
+func extractUserPart(raw string) string {
+	if raw == "anonymous" {
+		return raw
 	}
-
-	// "@" varsa öncesini al
-	if idx := strings.Index(clean, "@"); idx != -1 {
-		clean = clean[:idx]
+	s := raw
+	// "<" ve ">" karakterlerini temizle
+	if start := strings.Index(s, "<"); start != -1 {
+		s = s[start+1:]
 	}
-
-	// ":" varsa (port) ve @ yoksa, temizle (örn: 1001:5060)
-	// Dikkat: @'den sonraki port zaten yukarıda atıldı.
-	// Bu durum sadece saf "1001:5060" gibi durumlarda geçerli.
-	if idx := strings.Index(clean, ":"); idx != -1 {
-		clean = clean[:idx]
+	if end := strings.Index(s, ">"); end != -1 {
+		s = s[:end]
 	}
-
-	return clean
+	// "sip:" veya "sips:" önekini temizle
+	if strings.HasPrefix(s, "sip:") {
+		s = s[4:]
+	} else if strings.HasPrefix(s, "sips:") {
+		s = s[5:]
+	}
+	// "@" karakterinden sonrasını ve ";" karakterinden sonrasını at
+	if atIndex := strings.Index(s, "@"); atIndex != -1 {
+		s = s[:atIndex]
+	} else if semiIndex := strings.Index(s, ";"); semiIndex != -1 {
+		s = s[:semiIndex]
+	}
+	// Sadece rakamları al
+	var sb strings.Builder
+	for _, r := range s {
+		if unicode.IsDigit(r) {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
 }
 
-// normalizePhoneNumber: Telefon numarasını veritabanı formatına (genellikle 90...) çevirir.
-// "+90555..." -> "90555..."
-// "0555..." -> "90555..." (Varsayım: Türkiye)
-// "555..." -> "90555..." (Varsayım: Türkiye)
 func normalizePhoneNumber(phone string) string {
-	// Sadece rakamları al
+	if phone == "anonymous" {
+		return phone
+	}
 	var sb strings.Builder
 	for _, ch := range phone {
 		if unicode.IsDigit(ch) {
@@ -496,26 +479,17 @@ func normalizePhoneNumber(phone string) string {
 	}
 	cleaned := sb.String()
 
-	// Eğer boşsa olduğu gibi dön (Hata üst katmanda yakalanır)
 	if cleaned == "" {
 		return phone
 	}
-
-	// 1. Durum: 90 ile başlıyorsa (12 hane) -> Tamam
 	if len(cleaned) == 12 && strings.HasPrefix(cleaned, "90") {
 		return cleaned
 	}
-
-	// 2. Durum: 0 ile başlıyorsa (11 hane - 0555...) -> 90 ekle, 0'ı at
 	if len(cleaned) == 11 && strings.HasPrefix(cleaned, "0") {
 		return "90" + cleaned[1:]
 	}
-
-	// 3. Durum: 10 hane (555...) -> Başına 90 ekle
 	if len(cleaned) == 10 {
 		return "90" + cleaned
 	}
-
-	// Diğer durumlar (Örn: Kısa numara 9999, 1001) -> Dokunma
 	return cleaned
 }
