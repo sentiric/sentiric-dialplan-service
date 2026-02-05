@@ -104,13 +104,12 @@ func NewUserServiceClient(targetURL string, cfg config.Config) (userv1.UserServi
 // --- CORE LOGIC: RESOLVE DIALPLAN ---
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	// 1. Hedef Numarayı Temizle (SIP URI -> Saf Numara -> Normalize Numara)
-	// [ARCHITECTURAL CHANGE - UES 1.0] EDGE SANITIZATION
-	// Veri, iş mantığına girmeden hemen önce temizleniyor.
+	// [ARCHITECTURAL DECISION: UES 1.0] EDGE SANITIZATION
+	// 1. Hedef Numarayı Temizle (Route bulmak için)
 	rawDestination := extractUserPart(destination)
 	cleanDestination := normalizePhoneNumber(rawDestination)
 
-	// Arayan Numarayı da Temizle (User Service'e temiz göndermek için)
+	// 2. Arayan Numarayı Temizle (User bulmak için)
 	rawCaller := extractUserPart(caller)
 	cleanCaller := normalizePhoneNumber(rawCaller)
 
@@ -461,16 +460,21 @@ func toPtr(s string) *string {
 // extractUserPart: SIP URI'den kullanıcı kısmını çıkarır (örn: sip:1001@domain -> 1001)
 func extractUserPart(uri string) string {
 	clean := uri
+	// "sip:" veya "sips:" öneki varsa kaldır
 	if strings.HasPrefix(clean, "sip:") {
 		clean = clean[4:]
 	} else if strings.HasPrefix(clean, "sips:") {
 		clean = clean[5:]
 	}
 
+	// "@" varsa öncesini al
 	if idx := strings.Index(clean, "@"); idx != -1 {
 		clean = clean[:idx]
 	}
 
+	// ":" varsa (port) ve @ yoksa, temizle (örn: 1001:5060)
+	// Dikkat: @'den sonraki port zaten yukarıda atıldı.
+	// Bu durum sadece saf "1001:5060" gibi durumlarda geçerli.
 	if idx := strings.Index(clean, ":"); idx != -1 {
 		clean = clean[:idx]
 	}
@@ -479,6 +483,9 @@ func extractUserPart(uri string) string {
 }
 
 // normalizePhoneNumber: Telefon numarasını veritabanı formatına (genellikle 90...) çevirir.
+// "+90555..." -> "90555..."
+// "0555..." -> "90555..." (Varsayım: Türkiye)
+// "555..." -> "90555..." (Varsayım: Türkiye)
 func normalizePhoneNumber(phone string) string {
 	// Sadece rakamları al
 	var sb strings.Builder
@@ -489,6 +496,7 @@ func normalizePhoneNumber(phone string) string {
 	}
 	cleaned := sb.String()
 
+	// Eğer boşsa olduğu gibi dön (Hata üst katmanda yakalanır)
 	if cleaned == "" {
 		return phone
 	}
@@ -508,5 +516,6 @@ func normalizePhoneNumber(phone string) string {
 		return "90" + cleaned
 	}
 
+	// Diğer durumlar (Örn: Kısa numara 9999, 1001) -> Dokunma
 	return cleaned
 }
