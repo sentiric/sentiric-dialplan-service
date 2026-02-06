@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	// Eklendi: Array dönüşümü için gerekli olabilir (veya zaten vardı)
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,7 +43,7 @@ func (r *Repository) handleError(err error) error {
 			return dialplan.ErrConflict
 		case "42P01": // undefined_table
 			r.log.Error().Err(err).Msg("KRİTİK: Veritabanı şeması eksik!")
-			return dialplan.ErrTableMissing
+			return dialplan.ErrDatabase // En yakın Domain hatasına çevrildi.
 		}
 	}
 
@@ -54,11 +55,12 @@ func (r *Repository) handleError(err error) error {
 func (r *Repository) FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	var route dialplanv1.InboundRoute
 	var activeDP, offHoursDP, failsafeDP sql.NullString
+	var trunkID sql.NullInt32 // Geriye dönük uyumluluk için eklendi
 
-	query := `SELECT phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code FROM inbound_routes WHERE phone_number = $1`
+	query := `SELECT phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code, sip_trunk_id FROM inbound_routes WHERE phone_number = $1`
 	err := r.db.QueryRow(ctx, query, phoneNumber).Scan(
 		&route.PhoneNumber, &route.TenantId, &activeDP, &offHoursDP, &failsafeDP,
-		&route.IsMaintenanceMode, &route.DefaultLanguageCode,
+		&route.IsMaintenanceMode, &route.DefaultLanguageCode, &trunkID,
 	)
 	if err != nil {
 		return nil, r.handleError(err)
@@ -80,13 +82,8 @@ func (r *Repository) FindInboundRouteByPhone(ctx context.Context, phoneNumber st
 func (r *Repository) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	query := `INSERT INTO inbound_routes (phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code) VALUES ($1, $2, $3, $4, $5, $6, $7)`
 	_, err := r.db.Exec(ctx, query,
-		route.PhoneNumber,
-		route.TenantId,
-		route.ActiveDialplanId,
-		route.OffHoursDialplanId,
-		route.FailsafeDialplanId,
-		route.IsMaintenanceMode,
-		route.DefaultLanguageCode,
+		route.PhoneNumber, route.TenantId, route.ActiveDialplanId, route.OffHoursDialplanId, route.FailsafeDialplanId,
+		route.IsMaintenanceMode, route.DefaultLanguageCode,
 	)
 	return r.handleError(err)
 }
@@ -94,8 +91,7 @@ func (r *Repository) CreateInboundRoute(ctx context.Context, route *dialplanv1.I
 func (r *Repository) UpdateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) (int64, error) {
 	query := `UPDATE inbound_routes SET tenant_id = $2, active_dialplan_id = $3, off_hours_dialplan_id = $4, failsafe_dialplan_id = $5, is_maintenance_mode = $6, default_language_code = $7 WHERE phone_number = $1`
 	cmdTag, err := r.db.Exec(ctx, query,
-		route.PhoneNumber, route.TenantId, route.ActiveDialplanId,
-		route.OffHoursDialplanId, route.FailsafeDialplanId,
+		route.PhoneNumber, route.TenantId, route.ActiveDialplanId, route.OffHoursDialplanId, route.FailsafeDialplanId,
 		route.IsMaintenanceMode, route.DefaultLanguageCode,
 	)
 	if err != nil {
@@ -112,6 +108,7 @@ func (r *Repository) DeleteInboundRoute(ctx context.Context, phoneNumber string)
 	return cmdTag.RowsAffected(), nil
 }
 
+// LIST IMPLEMENTATION (dialplan.Repository arayüzünü tatmin etmek için)
 func (r *Repository) ListInboundRoutes(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.InboundRoute, error) {
 	baseQuery := "SELECT phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, is_maintenance_mode, default_language_code FROM inbound_routes"
 	args := []interface{}{}
@@ -119,7 +116,6 @@ func (r *Repository) ListInboundRoutes(ctx context.Context, tenantID string, pag
 		baseQuery += " WHERE tenant_id = $1"
 		args = append(args, tenantID)
 	}
-	// Güvenlik: Sort by phone_number eklendi (Deterministic Pagination)
 	dataQuery := baseQuery + fmt.Sprintf(" ORDER BY phone_number ASC LIMIT %d OFFSET %d", pageSize, offset)
 
 	rows, err := r.db.Query(ctx, dataQuery, args...)
@@ -132,7 +128,8 @@ func (r *Repository) ListInboundRoutes(ctx context.Context, tenantID string, pag
 	for rows.Next() {
 		var route dialplanv1.InboundRoute
 		var activeDP, offHoursDP, failsafeDP sql.NullString
-		if err := rows.Scan(&route.PhoneNumber, &route.TenantId, &activeDP, &offHoursDP, &failsafeDP, &route.IsMaintenanceMode, &route.DefaultLanguageCode); err != nil {
+		var trunkID sql.NullInt32
+		if err := rows.Scan(&route.PhoneNumber, &route.TenantId, &activeDP, &offHoursDP, &failsafeDP, &route.IsMaintenanceMode, &route.DefaultLanguageCode, &trunkID); err != nil {
 			return nil, r.handleError(err)
 		}
 		if activeDP.Valid {
@@ -149,6 +146,7 @@ func (r *Repository) ListInboundRoutes(ctx context.Context, tenantID string, pag
 	return routes, nil
 }
 
+// COUNT IMPLEMENTATION (dialplan.Repository arayüzünü tatmin etmek için)
 func (r *Repository) CountInboundRoutes(ctx context.Context, tenantID string) (int32, error) {
 	var totalCount int32
 	baseQuery := "SELECT count(*) FROM inbound_routes"
@@ -215,6 +213,7 @@ func (r *Repository) DeleteDialplan(ctx context.Context, id string) (int64, erro
 	return cmdTag.RowsAffected(), nil
 }
 
+// LIST IMPLEMENTATION (dialplan.Repository arayüzünü tatmin etmek için)
 func (r *Repository) ListDialplans(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.Dialplan, error) {
 	baseQuery := "SELECT id, tenant_id, description, action, action_data FROM dialplans"
 	args := []interface{}{}
@@ -241,6 +240,7 @@ func (r *Repository) ListDialplans(ctx context.Context, tenantID string, pageSiz
 	return dialplans, nil
 }
 
+// COUNT IMPLEMENTATION (dialplan.Repository arayüzünü tatmin etmek için)
 func (r *Repository) CountDialplans(ctx context.Context, tenantID string) (int32, error) {
 	var totalCount int32
 	baseQuery := "SELECT count(*) FROM dialplans"

@@ -1,3 +1,4 @@
+// sentiric-dialplan-service/internal/service/dialplan/errors.go
 package dialplan
 
 import "errors"
@@ -11,7 +12,7 @@ var (
 
 	// ErrDatabase: Beklenmeyen veritabanı hatası.
 	ErrDatabase = errors.New("database internal error")
-	
+
 	// ErrTableMissing: Kritik altyapı hatası (Tablo yok).
 	ErrTableMissing = errors.New("critical: database table missing")
 )
