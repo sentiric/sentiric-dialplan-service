@@ -4,6 +4,8 @@ package dialplan
 import (
 	"strings"
 	"unicode"
+
+	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 )
 
 func safeString(s *string) string {
@@ -15,6 +17,23 @@ func safeString(s *string) string {
 
 func toPtr(s string) *string {
 	return &s
+}
+
+// MapStringToActionType: Veritabanındaki string aksiyonu Protobuf Enum'a çevirir.
+// Bu fonksiyon, B2BUA servisindeki "invalid wire type" hatasını çözer.
+func MapStringToActionType(action string) dialplanv1.ActionType {
+	switch strings.ToUpper(action) {
+	case "START_AI_CONVERSATION":
+		return dialplanv1.ActionType_ACTION_TYPE_START_AI_CONVERSATION
+	case "BRIDGE_CALL":
+		return dialplanv1.ActionType_ACTION_TYPE_BRIDGE_CALL
+	case "ECHO_TEST", "ECHO":
+		return dialplanv1.ActionType_ACTION_TYPE_ECHO_TEST
+	case "PLAY_ANNOUNCEMENT", "PLAY_STATIC_ANNOUNCEMENT":
+		return dialplanv1.ActionType_ACTION_TYPE_PLAY_STATIC_ANNOUNCEMENT
+	default:
+		return dialplanv1.ActionType_ACTION_TYPE_UNSPECIFIED
+	}
 }
 
 // extractUserPart, SIP URI/AOR'dan kullanıcı bölümünü güvenli bir şekilde ayıklar.
