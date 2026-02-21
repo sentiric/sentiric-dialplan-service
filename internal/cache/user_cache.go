@@ -1,4 +1,3 @@
-// sentiric-dialplan-service/internal/cache/user_cache.go
 package cache
 
 import (
@@ -10,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
-	"github.com/sentiric/sentiric-dialplan-service/internal/logger" // Sabitler için
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 )
 
 const UserCacheTTL = 5 * time.Minute
@@ -23,7 +22,6 @@ func NewUserCache(redisClient *redis.Client) *UserCache {
 	return &UserCache{redis: redisClient}
 }
 
-// GetUser log instance alarak trace_id'yi korur
 func (c *UserCache) GetUser(ctx context.Context, phoneNumber string, log zerolog.Logger) (*userv1.User, error) {
 	key := fmt.Sprintf("user:phone:%s", phoneNumber)
 
@@ -32,19 +30,25 @@ func (c *UserCache) GetUser(ctx context.Context, phoneNumber string, log zerolog
 		return nil, nil
 	}
 	if err != nil {
-		log.Error().Err(err).Str("event", "CACHE_READ_ERROR").Str("phone", phoneNumber).Msg("Redis read error")
+		log.Error().Err(err).
+			Str("event", "CACHE_READ_ERROR").
+			Dict("attributes", zerolog.Dict().Str("phone", phoneNumber)).
+			Msg("Redis read error")
 		return nil, err
 	}
 
 	var user userv1.User
 	if err := json.Unmarshal([]byte(val), &user); err != nil {
-		log.Error().Err(err).Str("event", "CACHE_PARSE_ERROR").Msg("Failed to unmarshal cached user")
+		log.Error().Err(err).
+			Str("event", "CACHE_PARSE_ERROR").
+			Dict("attributes", zerolog.Dict()).
+			Msg("Failed to unmarshal cached user")
 		return nil, err
 	}
 
 	log.Debug().
 		Str("event", logger.EventUserCacheHit).
-		Str("phone", phoneNumber).
+		Dict("attributes", zerolog.Dict().Str("phone", phoneNumber)).
 		Msg("✅ User Cache HIT")
 
 	return &user, nil
@@ -59,13 +63,16 @@ func (c *UserCache) SetUser(ctx context.Context, phoneNumber string, user *userv
 	}
 
 	if err := c.redis.Set(ctx, key, data, UserCacheTTL).Err(); err != nil {
-		log.Error().Err(err).Str("event", "CACHE_WRITE_ERROR").Msg("Failed to write to cache")
+		log.Error().Err(err).
+			Str("event", "CACHE_WRITE_ERROR").
+			Dict("attributes", zerolog.Dict()).
+			Msg("Failed to write to cache")
 		return err
 	}
 
 	log.Debug().
 		Str("event", "USER_CACHED").
-		Str("phone", phoneNumber).
+		Dict("attributes", zerolog.Dict().Str("phone", phoneNumber)).
 		Msg("User cached successfully")
 
 	return nil

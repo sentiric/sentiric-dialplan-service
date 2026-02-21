@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rs/zerolog"
 	"github.com/sentiric/sentiric-dialplan-service/internal/app"
 	"github.com/sentiric/sentiric-dialplan-service/internal/config"
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
@@ -24,7 +25,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// SUTS v4.0 Logger Init
 	log := logger.New(
 		serviceName,
 		cfg.ServiceVersion,
@@ -34,11 +34,12 @@ func main() {
 		cfg.LogFormat,
 	)
 
-	// Başlangıç Logu
+	// SUTS v4.0 STRICT FORMAT
 	log.Info().
 		Str("event", "SYSTEM_STARTUP").
-		Str("commit", GitCommit).
-		Str("build_date", BuildDate).
+		Dict("attributes", zerolog.Dict().
+			Str("commit", GitCommit).
+			Str("build_date", BuildDate)).
 		Msg("🚀 dialplan-service başlatılıyor (SUTS v4.0)...")
 
 	application := app.NewApp(cfg, log)

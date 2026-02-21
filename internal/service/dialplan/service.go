@@ -43,10 +43,12 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
+	// SUTS v4.0 STRICT FORMAT
 	l.Info().
 		Str("event", logger.EventDialplanResolveStart).
-		Str("sip.caller", cleanCaller).
-		Str("sip.destination", cleanDestination).
+		Dict("attributes", zerolog.Dict().
+			Str("sip.caller", cleanCaller).
+			Str("sip.destination", cleanDestination)).
 		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
@@ -54,18 +56,22 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		if errors.Is(err, ErrNotFound) {
 			l.Warn().
 				Str("event", logger.EventRouteNotFound).
-				Str("sip.destination", cleanDestination).
+				Dict("attributes", zerolog.Dict().
+					Str("sip.destination", cleanDestination)).
 				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
 
 			guestRoute := &dialplanv1.InboundRoute{PhoneNumber: cleanDestination, TenantId: "system", DefaultLanguageCode: "tr"}
 			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
-		l.Error().Err(err).Str("event", "DB_ERROR").Msg("Route sorgusu başarısız")
+		l.Error().Err(err).Str("event", "DB_ERROR").Dict("attributes", zerolog.Dict()).Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
 	if route.IsMaintenanceMode {
-		l.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
+		l.Warn().
+			Str("event", logger.EventMaintenanceMode).
+			Dict("attributes", zerolog.Dict()).
+			Msg("🔧 Hat bakım modunda.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
@@ -87,7 +93,11 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 
 	if matchedUser == nil {
-		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, querying User Service")
+		l.Debug().
+			Str("event", logger.EventUserCacheMiss).
+			Dict("attributes", zerolog.Dict()).
+			Msg("Cache miss, querying User Service")
+
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
 				ContactType: "phone", ContactValue: cleanCaller,
@@ -100,7 +110,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-			l.Error().Err(err).Str("event", logger.EventUserLookupFailed).Msg("❌ Kullanıcı sorgusu başarısız")
+			l.Error().Err(err).
+				Str("event", logger.EventUserLookupFailed).
+				Dict("attributes", zerolog.Dict()).
+				Msg("❌ Kullanıcı sorgusu başarısız")
 		}
 	}
 
@@ -111,7 +124,8 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 
 		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
-			Str("action", activePlan.Action.GetAction()).
+			Dict("attributes", zerolog.Dict().
+				Str("action", activePlan.Action.GetAction())).
 			Msg("✅ Dialplan başarıyla çözüldü")
 
 		return &dialplanv1.ResolveDialplanResponse{
