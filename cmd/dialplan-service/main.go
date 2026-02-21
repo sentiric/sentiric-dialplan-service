@@ -1,4 +1,3 @@
-// sentiric-dialplan-service/cmd/dialplan-service/main.go
 package main
 
 import (
@@ -25,14 +24,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(serviceName, cfg.Env, cfg.LogLevel)
+	// SUTS v4.0 Logger Init
+	log := logger.New(
+		serviceName,
+		cfg.ServiceVersion,
+		cfg.Env,
+		cfg.NodeHostname,
+		cfg.LogLevel,
+		cfg.LogFormat,
+	)
 
+	// Başlangıç Logu
 	log.Info().
-		Str("version", ServiceVersion).
+		Str("event", "SYSTEM_STARTUP").
 		Str("commit", GitCommit).
 		Str("build_date", BuildDate).
-		Str("profile", cfg.Env).
-		Msg("🚀 dialplan-service başlatılıyor...")
+		Msg("🚀 dialplan-service başlatılıyor (SUTS v4.0)...")
 
 	application := app.NewApp(cfg, log)
 	application.Run()

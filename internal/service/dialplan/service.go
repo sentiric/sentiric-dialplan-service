@@ -11,6 +11,7 @@ import (
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 	"github.com/sentiric/sentiric-dialplan-service/internal/cache"
 	grpchelper "github.com/sentiric/sentiric-dialplan-service/internal/grpc"
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger" // LOG PAKETİ EKLENDİ
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -28,30 +29,44 @@ type Service struct {
 	repo       Repository
 	userClient userv1.UserServiceClient
 	userCache  *cache.UserCache
-	log        zerolog.Logger
+	baseLog    zerolog.Logger
 }
 
 func NewService(repo Repository, userClient userv1.UserServiceClient, userCache *cache.UserCache, log zerolog.Logger) *Service {
-	return &Service{repo: repo, userClient: userClient, userCache: userCache, log: log}
+	return &Service{repo: repo, userClient: userClient, userCache: userCache, baseLog: log}
 }
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
+	// 1. Zenginleştirilmiş (Trace Aware) Logger'ı al
+	log := logger.ContextLogger(ctx, s.baseLog)
+
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
-	s.log.Info().Str("clean_dest", cleanDestination).Str("clean_caller", cleanCaller).Msg("📞 ResolveDialplan İsteği İşleniyor")
+	// [ZENGİNLEŞTİRME]: SUTS v4.0 Event ve Attributes
+	log.Info().
+		Str("event", logger.EventDialplanResolveStart).
+		Str("sip.caller", cleanCaller).
+		Str("sip.destination", cleanDestination).
+		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			s.log.Warn().Str("destination", cleanDestination).Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
+			log.Warn().
+				Str("event", logger.EventRouteNotFound).
+				Str("sip.destination", cleanDestination).
+				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
+
 			guestRoute := &dialplanv1.InboundRoute{PhoneNumber: cleanDestination, TenantId: "system", DefaultLanguageCode: "tr"}
 			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
+		log.Error().Err(err).Str("event", "DB_ERROR").Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
 	if route.IsMaintenanceMode {
+		log.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
@@ -63,32 +78,34 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	md, _ := metadata.FromIncomingContext(ctx)
-	traceID := "unknown"
-	if vals := md.Get("x-trace-id"); len(vals) > 0 {
-		traceID = vals[0]
-	}
+	// Alt servislere giden context'e trace_id ekle
+	traceID := logger.ExtractTraceIDFromContext(ctx)
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
 
 	if s.userCache != nil {
-		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller)
+		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller, log) // log parametresini ilet
 	}
 
 	if matchedUser == nil {
+		log.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, querying User Service")
+
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
 				ContactType: "phone", ContactValue: cleanCaller,
 			}, opts...)
 		}
+
 		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
 		if err == nil {
 			matchedUser = userRes.GetUser()
 			if s.userCache != nil && matchedUser != nil {
-				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser)
+				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, log)
 			}
+		} else {
+			log.Error().Err(err).Str("event", logger.EventUserLookupFailed).Msg("❌ Kullanıcı sorgusu başarısız")
 		}
 	}
 
@@ -96,6 +113,12 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		if matchedUser == nil {
 			matchedUser = &userv1.User{Id: "anonymous", Name: toPtr("Misafir Kullanıcı"), TenantId: route.TenantId, UserType: "caller"}
 		}
+
+		log.Info().
+			Str("event", logger.EventDialplanResolveDone).
+			Str("action", activePlan.Action.GetAction()).
+			Msg("✅ Dialplan başarıyla çözüldü")
+
 		return &dialplanv1.ResolveDialplanResponse{
 			DialplanId: activePlan.Id, TenantId: activePlan.TenantId, Action: activePlan.Action,
 			MatchedUser: matchedUser, MatchedContact: matchedContact, InboundRoute: route,
@@ -105,6 +128,28 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, matchedUser, matchedContact, route)
 }
 
+func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
+	if planID == "" {
+		planID = DialplanSystemFailsafe
+	}
+	plan, err := s.repo.FindDialplanByID(ctx, planID)
+	if err != nil {
+		emergencyPlan := &dialplanv1.DialplanAction{
+			Action:     ActionPlayAnnouncement,
+			ActionData: map[string]string{"announcement_id": AnnouncementSystemError},
+		}
+		return &dialplanv1.ResolveDialplanResponse{
+			DialplanId: "EMERGENCY_MODE", TenantId: "system", Action: emergencyPlan,
+			MatchedUser: user, MatchedContact: contact, InboundRoute: route,
+		}, nil
+	}
+	return &dialplanv1.ResolveDialplanResponse{
+		DialplanId: plan.Id, TenantId: plan.TenantId, Action: plan.Action,
+		MatchedUser: user, MatchedContact: contact, InboundRoute: route,
+	}, nil
+}
+
+// ... CRUD metodları aşağıda orijinal kodundaki gibi kalabilir (Mekan kısıtından dolayı sadece body'leri dolduruyoruz)
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	err := s.repo.CreateInboundRoute(ctx, route)
@@ -225,10 +270,8 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
 }
 
-// [v1.15.0 FIX]: ActionData artık doğrudan bir haritadır.
 func (s *Service) serializeActionData(dp *dialplanv1.Dialplan) ([]byte, error) {
 	if dp.GetAction() != nil && dp.GetAction().GetActionData() != nil {
-		// GetData() silindi, doğrudan map dönüyor.
 		data := dp.GetAction().GetActionData()
 		bytes, err := json.Marshal(data)
 		if err != nil {
@@ -237,26 +280,4 @@ func (s *Service) serializeActionData(dp *dialplanv1.Dialplan) ([]byte, error) {
 		return bytes, nil
 	}
 	return []byte("{}"), nil
-}
-
-func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
-	if planID == "" {
-		planID = DialplanSystemFailsafe
-	}
-	plan, err := s.repo.FindDialplanByID(ctx, planID)
-	if err != nil {
-		// Emergency plan with v1.15.0 map structure
-		emergencyPlan := &dialplanv1.DialplanAction{
-			Action:     ActionPlayAnnouncement,
-			ActionData: map[string]string{"announcement_id": AnnouncementSystemError},
-		}
-		return &dialplanv1.ResolveDialplanResponse{
-			DialplanId: "EMERGENCY_MODE", TenantId: "system", Action: emergencyPlan,
-			MatchedUser: user, MatchedContact: contact, InboundRoute: route,
-		}, nil
-	}
-	return &dialplanv1.ResolveDialplanResponse{
-		DialplanId: plan.Id, TenantId: plan.TenantId, Action: plan.Action,
-		MatchedUser: user, MatchedContact: contact, InboundRoute: route,
-	}, nil
 }

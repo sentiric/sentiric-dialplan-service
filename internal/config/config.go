@@ -1,4 +1,3 @@
-// sentiric-dialplan-service/internal/config/config.go
 package config
 
 import (
@@ -9,48 +8,46 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ServerConfig, HTTP ve gRPC sunucu portlarını tutar.
 type ServerConfig struct {
 	HttpPort    string
 	GRPCPort    string
 	MetricsPort string
 }
 
-// TLSConfig, mTLS için sertifika yollarını tutar.
 type TLSConfig struct {
 	CertPath string
 	KeyPath  string
 	CaPath   string
 }
 
-// Config, uygulamanın tüm yapılandırmasını içerir.
 type Config struct {
 	Env            string
 	LogLevel       string
+	LogFormat      string // YENİ: Log Format
+	NodeHostname   string // YENİ: SUTS için zorunlu fiziksel sunucu adı
+	ServiceVersion string // YENİ: Versiyon
 	DatabaseURL    string
-	UserServiceURL string // Bu alan, TARGET URL'i tutacak
-	RedisURL       string // ✅ EKLENDİ: Redis Cache URL
+	UserServiceURL string
+	RedisURL       string
 	Server         ServerConfig
 	TLS            TLSConfig
 }
 
-// Load, .env dosyasını ve ortam değişkenlerini okuyarak yapılandırmayı oluşturur.
 func Load() (*Config, error) {
 	if err := godotenv.Load(); err != nil {
 		log.Info().Msg(".env dosyası bulunamadı, ortam değişkenleri kullanılacak.")
 	}
 
 	cfg := &Config{
-		Env:         getEnv("ENV", "production"),
-		LogLevel:    getEnv("LOG_LEVEL", "info"),
-		DatabaseURL: getEnvOrFail("POSTGRES_URL"),
+		Env:            getEnv("ENV", "production"),
+		LogLevel:       getEnv("LOG_LEVEL", "info"),
+		LogFormat:      getEnv("LOG_FORMAT", "json"), // SUTS v4.0 için
+		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"),
+		ServiceVersion: getEnv("SERVICE_VERSION", "1.0.0"),
 
-		// --- KRİTİK DEĞİŞİKLİK BURADA ---
-		// Artık `user-service` için özel olarak tanımlanmış HEDEF URL'ini okuyoruz.
+		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),
 		UserServiceURL: getEnvOrFail("USER_SERVICE_TARGET_GRPC_URL"),
-
-		RedisURL: getEnv("REDIS_URL", "redis://redis:6379"), // Cache için Redis
-		// --- DEĞİŞİKLİK SONA ERDİ ---
+		RedisURL:       getEnv("REDIS_URL", "redis://redis:6379"),
 
 		Server: ServerConfig{
 			HttpPort:    getEnv("DIALPLAN_SERVICE_HTTP_PORT", "12020"),
@@ -67,7 +64,6 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// getEnv, belirtilen anahtarla bir ortam değişkenini okur, bulunamazsa varsayılan değeri döndürür.
 func getEnv(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value
@@ -75,11 +71,9 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// getEnvOrFail, belirtilen anahtarla bir ortam değişkenini okur, bulunamazsa programı sonlandırır.
 func getEnvOrFail(key string) string {
 	value, exists := os.LookupEnv(key)
 	if !exists {
-		// Logger henüz başlatılmadığı için fmt kullanıyoruz.
 		fmt.Fprintf(os.Stderr, "Kritik Hata: Gerekli ortam değişkeni tanımlı değil: %s\n", key)
 		os.Exit(1)
 	}
