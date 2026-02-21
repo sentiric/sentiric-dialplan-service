@@ -1,3 +1,4 @@
+// sentiric-dialplan-service/internal/config/config.go
 package config
 
 import (
@@ -5,7 +6,6 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
-	"github.com/rs/zerolog/log"
 )
 
 type ServerConfig struct {
@@ -23,9 +23,9 @@ type TLSConfig struct {
 type Config struct {
 	Env            string
 	LogLevel       string
-	LogFormat      string // YENİ: Log Format
-	NodeHostname   string // YENİ: SUTS için zorunlu fiziksel sunucu adı
-	ServiceVersion string // YENİ: Versiyon
+	LogFormat      string
+	NodeHostname   string
+	ServiceVersion string
 	DatabaseURL    string
 	UserServiceURL string
 	RedisURL       string
@@ -34,20 +34,19 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	if err := godotenv.Load(); err != nil {
-		log.Info().Msg(".env dosyası bulunamadı, ortam değişkenleri kullanılacak.")
-	}
+	// Sessiz yükleme (Gürültü yapmaması için log kaldırıldı)
+	_ = godotenv.Load()
 
 	cfg := &Config{
 		Env:            getEnv("ENV", "production"),
 		LogLevel:       getEnv("LOG_LEVEL", "info"),
-		LogFormat:      getEnv("LOG_FORMAT", "json"), // SUTS v4.0 için
+		LogFormat:      getEnv("LOG_FORMAT", "json"),
 		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"),
 		ServiceVersion: getEnv("SERVICE_VERSION", "1.0.0"),
 
 		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),
 		UserServiceURL: getEnvOrFail("USER_SERVICE_TARGET_GRPC_URL"),
-		RedisURL:       getEnv("REDIS_URL", "redis://redis:6379"),
+		RedisURL:       getEnv("REDIS_URL", "redis://redis.service.sentiric.cloud:6379/0"),
 
 		Server: ServerConfig{
 			HttpPort:    getEnv("DIALPLAN_SERVICE_HTTP_PORT", "12020"),

@@ -11,7 +11,7 @@ import (
 	userv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/user/v1"
 	"github.com/sentiric/sentiric-dialplan-service/internal/cache"
 	grpchelper "github.com/sentiric/sentiric-dialplan-service/internal/grpc"
-	"github.com/sentiric/sentiric-dialplan-service/internal/logger" // LOG PAKETİ EKLENDİ
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -37,14 +37,13 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, userCache 
 }
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	// 1. Zenginleştirilmiş (Trace Aware) Logger'ı al
-	log := logger.ContextLogger(ctx, s.baseLog)
+	traceID := logger.ExtractTraceIDFromContext(ctx)
+	l := logger.ContextLogger(ctx, s.baseLog)
 
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
-	// [ZENGİNLEŞTİRME]: SUTS v4.0 Event ve Attributes
-	log.Info().
+	l.Info().
 		Str("event", logger.EventDialplanResolveStart).
 		Str("sip.caller", cleanCaller).
 		Str("sip.destination", cleanDestination).
@@ -53,7 +52,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			log.Warn().
+			l.Warn().
 				Str("event", logger.EventRouteNotFound).
 				Str("sip.destination", cleanDestination).
 				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
@@ -61,12 +60,12 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			guestRoute := &dialplanv1.InboundRoute{PhoneNumber: cleanDestination, TenantId: "system", DefaultLanguageCode: "tr"}
 			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
-		log.Error().Err(err).Str("event", "DB_ERROR").Msg("Route sorgusu başarısız")
+		l.Error().Err(err).Str("event", "DB_ERROR").Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
 	if route.IsMaintenanceMode {
-		log.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
+		l.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
 		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
@@ -78,34 +77,30 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// Alt servislere giden context'e trace_id ekle
-	traceID := logger.ExtractTraceIDFromContext(ctx)
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
 
 	if s.userCache != nil {
-		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller, log) // log parametresini ilet
+		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller, l)
 	}
 
 	if matchedUser == nil {
-		log.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, querying User Service")
-
+		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, querying User Service")
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
 				ContactType: "phone", ContactValue: cleanCaller,
 			}, opts...)
 		}
-
 		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
 		if err == nil {
 			matchedUser = userRes.GetUser()
 			if s.userCache != nil && matchedUser != nil {
-				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, log)
+				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-			log.Error().Err(err).Str("event", logger.EventUserLookupFailed).Msg("❌ Kullanıcı sorgusu başarısız")
+			l.Error().Err(err).Str("event", logger.EventUserLookupFailed).Msg("❌ Kullanıcı sorgusu başarısız")
 		}
 	}
 
@@ -114,7 +109,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			matchedUser = &userv1.User{Id: "anonymous", Name: toPtr("Misafir Kullanıcı"), TenantId: route.TenantId, UserType: "caller"}
 		}
 
-		log.Info().
+		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
 			Str("action", activePlan.Action.GetAction()).
 			Msg("✅ Dialplan başarıyla çözüldü")
@@ -149,7 +144,6 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user
 	}, nil
 }
 
-// ... CRUD metodları aşağıda orijinal kodundaki gibi kalabilir (Mekan kısıtından dolayı sadece body'leri dolduruyoruz)
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	err := s.repo.CreateInboundRoute(ctx, route)
@@ -163,8 +157,7 @@ func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.Inbo
 }
 
 func (s *Service) GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
-	normPhone := normalizePhoneNumber(phoneNumber)
-	route, err := s.repo.FindInboundRouteByPhone(ctx, normPhone)
+	route, err := s.repo.FindInboundRouteByPhone(ctx, normalizePhoneNumber(phoneNumber))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, status.Errorf(codes.NotFound, "Route yok")
@@ -184,8 +177,7 @@ func (s *Service) UpdateInboundRoute(ctx context.Context, route *dialplanv1.Inbo
 }
 
 func (s *Service) DeleteInboundRoute(ctx context.Context, phoneNumber string) error {
-	normPhone := normalizePhoneNumber(phoneNumber)
-	rows, err := s.repo.DeleteInboundRoute(ctx, normPhone)
+	rows, err := s.repo.DeleteInboundRoute(ctx, normalizePhoneNumber(phoneNumber))
 	if err != nil || rows == 0 {
 		return status.Errorf(codes.NotFound, "Silinemedi")
 	}
@@ -193,17 +185,15 @@ func (s *Service) DeleteInboundRoute(ctx context.Context, phoneNumber string) er
 }
 
 func (s *Service) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInboundRoutesRequest) (*dialplanv1.ListInboundRoutesResponse, error) {
-	page := req.GetPage()
+	page, pageSize := req.GetPage(), req.GetPageSize()
 	if page < 1 {
 		page = 1
 	}
-	pageSize := req.GetPageSize()
 	if pageSize < 1 {
 		pageSize = 10
 	}
-	offset := (page - 1) * pageSize
 	total, _ := s.repo.CountInboundRoutes(ctx, req.GetTenantId())
-	routes, err := s.repo.ListInboundRoutes(ctx, req.GetTenantId(), pageSize, offset)
+	routes, err := s.repo.ListInboundRoutes(ctx, req.GetTenantId(), pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Hata")
 	}
@@ -216,8 +206,7 @@ func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDial
 	if err != nil {
 		return err
 	}
-	err = s.repo.CreateDialplan(ctx, dp, actionDataBytes)
-	if err != nil {
+	if err = s.repo.CreateDialplan(ctx, dp, actionDataBytes); err != nil {
 		return status.Errorf(codes.Internal, "Hata")
 	}
 	return nil
@@ -237,33 +226,29 @@ func (s *Service) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDial
 	if err != nil {
 		return err
 	}
-	rows, err := s.repo.UpdateDialplan(ctx, dp, actionDataBytes)
-	if err != nil || rows == 0 {
+	if rows, err := s.repo.UpdateDialplan(ctx, dp, actionDataBytes); err != nil || rows == 0 {
 		return status.Errorf(codes.NotFound, "Hata")
 	}
 	return nil
 }
 
 func (s *Service) DeleteDialplan(ctx context.Context, id string) error {
-	rows, err := s.repo.DeleteDialplan(ctx, id)
-	if err != nil || rows == 0 {
+	if rows, err := s.repo.DeleteDialplan(ctx, id); err != nil || rows == 0 {
 		return status.Errorf(codes.NotFound, "Hata")
 	}
 	return nil
 }
 
 func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
-	page := req.GetPage()
+	page, pageSize := req.GetPage(), req.GetPageSize()
 	if page < 1 {
 		page = 1
 	}
-	pageSize := req.GetPageSize()
 	if pageSize < 1 {
 		pageSize = 10
 	}
-	offset := (page - 1) * pageSize
 	total, _ := s.repo.CountDialplans(ctx, req.GetTenantId())
-	dialplans, err := s.repo.ListDialplans(ctx, req.GetTenantId(), pageSize, offset)
+	dialplans, err := s.repo.ListDialplans(ctx, req.GetTenantId(), pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Hata")
 	}
@@ -272,12 +257,9 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 
 func (s *Service) serializeActionData(dp *dialplanv1.Dialplan) ([]byte, error) {
 	if dp.GetAction() != nil && dp.GetAction().GetActionData() != nil {
-		data := dp.GetAction().GetActionData()
-		bytes, err := json.Marshal(data)
-		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, "JSON hatası")
+		if bytes, err := json.Marshal(dp.GetAction().GetActionData()); err == nil {
+			return bytes, nil
 		}
-		return bytes, nil
 	}
 	return []byte("{}"), nil
 }
