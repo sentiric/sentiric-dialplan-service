@@ -4,6 +4,7 @@ package logger
 import (
 	"context"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -15,6 +16,7 @@ const (
 	DefaultTenant = "sentiric_demo"
 )
 
+// Standart Event İsimleri
 const (
 	EventSystemStartup        = "SYSTEM_STARTUP"
 	EventGrpcRequest          = "GRPC_REQUEST_RECEIVED"
@@ -33,23 +35,23 @@ type SutsHook struct {
 }
 
 func (h SutsHook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
-	// SUTS v4.0 Ana Alanları
+	// 1. Governance
 	e.Str("schema_v", SchemaVersion)
 	e.Str("tenant_id", DefaultTenant)
 
-	// Resource Bloğu
+	// 2. Resource (Nested Object)
 	dict := zerolog.Dict()
 	for k, v := range h.Resource {
 		dict.Str(k, v)
 	}
 	e.Dict("resource", dict)
-
-	// DİKKAT: e.Discard() KALDIRILDI! Sistem artık konuşacak.
 }
 
+// New: SUTS v4.0 uyumlu Logger oluşturur.
 func New(serviceName, version, env, hostname, logLevel, logFormat string) zerolog.Logger {
 	var logger zerolog.Logger
 
+	// Log Seviyesini Parse Et
 	level, err := zerolog.ParseLevel(logLevel)
 	if err != nil {
 		level = zerolog.InfoLevel
@@ -63,22 +65,10 @@ func New(serviceName, version, env, hostname, logLevel, logFormat string) zerolo
 
 	// Severity değerlerini Uppercase yap (info -> INFO)
 	zerolog.LevelFieldMarshalFunc = func(l zerolog.Level) string {
-		switch l {
-		case zerolog.TraceLevel, zerolog.DebugLevel:
-			return "DEBUG"
-		case zerolog.InfoLevel:
-			return "INFO"
-		case zerolog.WarnLevel:
-			return "WARN"
-		case zerolog.ErrorLevel:
-			return "ERROR"
-		case zerolog.FatalLevel, zerolog.PanicLevel:
-			return "FATAL"
-		default:
-			return "INFO"
-		}
+		return strings.ToUpper(l.String())
 	}
 
+	// Resource Context Hazırla
 	resource := map[string]string{
 		"service.name":    serviceName,
 		"service.version": version,
@@ -89,24 +79,44 @@ func New(serviceName, version, env, hostname, logLevel, logFormat string) zerolo
 	sutsHook := SutsHook{Resource: resource}
 
 	if logFormat == "json" {
-		logger = zerolog.New(os.Stderr).Hook(sutsHook).With().Timestamp().Logger()
+		// Production: JSON + SUTS Hook
+		logger = zerolog.New(os.Stderr).
+			Hook(sutsHook).
+			With().
+			Timestamp().
+			Logger()
 	} else {
-		output := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-		logger = zerolog.New(output).With().Timestamp().Str("service", serviceName).Logger()
+		// Development: Renkli Console
+		output := zerolog.ConsoleWriter{
+			Out:        os.Stderr,
+			TimeFormat: time.RFC3339,
+		}
+		// Dev modunda bile temel alanları görelim
+		logger = zerolog.New(output).
+			With().
+			Timestamp().
+			Str("service", serviceName).
+			Logger()
 	}
 
 	return logger.Level(level)
 }
 
+// ExtractTraceIDFromContext: gRPC Metadata'dan trace_id çeker
 func ExtractTraceIDFromContext(ctx context.Context) string {
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		// İstek başlıklarında "x-trace-id" veya "trace-id" ara
 		if vals := md.Get("x-trace-id"); len(vals) > 0 && vals[0] != "" {
+			return vals[0]
+		}
+		if vals := md.Get("trace_id"); len(vals) > 0 && vals[0] != "" {
 			return vals[0]
 		}
 	}
 	return "unknown"
 }
 
+// ContextLogger: Trace ID ile zenginleştirilmiş logger döndürür
 func ContextLogger(ctx context.Context, baseLog zerolog.Logger) zerolog.Logger {
 	traceID := ExtractTraceIDFromContext(ctx)
 	if traceID != "unknown" {

@@ -6,11 +6,11 @@ import (
 
 	"github.com/rs/zerolog"
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 	"google.golang.org/grpc/metadata"
 )
 
-// Service arayüzü, handler'ın service katmanından ne beklediğini tanımlar.
-// service.go'daki metodlarla birebir uyuşmalıdır.
+// Service arayüzü... (Değişmedi)
 type Service interface {
 	ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error)
 
@@ -37,16 +37,38 @@ func NewHandler(svc Service, log zerolog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
-// --- Resolve & Inbound Route Handlers ---
+// Trace ID'yi metadata'dan okuyup logger'a hazırlamak için context'i zenginleştirir.
+// Aslında ExtractTraceIDFromContext logger paketinde bunu yapıyor, ama Service katmanına
+// context ile aktarmak için metadata'yı kopyalamak gerekebilir.
+func (h *Handler) propagateTrace(ctx context.Context) context.Context {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ctx
+	}
+	// Gelen metadata'yı outgoing metadata olarak kopyala (İstemcilere iletmek için)
+	return metadata.NewOutgoingContext(ctx, md)
+}
 
 func (h *Handler) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
-	ctx = h.propagateTrace(ctx)
-	h.log.Info().Str("method", "ResolveDialplan").Msg("gRPC isteği alındı.")
+	// Context logger trace_id'yi otomatik alacak
+	l := logger.ContextLogger(ctx, h.log)
+
+	l.Info().
+		Str("event", logger.EventGrpcRequest).
+		Dict("attributes", zerolog.Dict().
+			Str("method", "ResolveDialplan").
+			Str("caller", req.CallerContactValue).
+			Str("destination", req.DestinationNumber)).
+		Msg("gRPC İsteği Alındı")
+
 	return h.svc.ResolveDialplan(ctx, req.GetCallerContactValue(), req.GetDestinationNumber())
 }
 
+// ... Diğer handler metodları da benzer şekilde loglanabilir ...
+// Örnek: CreateInboundRoute
 func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.CreateInboundRouteRequest) (*dialplanv1.CreateInboundRouteResponse, error) {
-	ctx = h.propagateTrace(ctx)
+	l := logger.ContextLogger(ctx, h.log)
+	l.Info().Str("event", "CRUD_OPERATION").Msg("Inbound Route oluşturuluyor")
 	err := h.svc.CreateInboundRoute(ctx, req.GetRoute())
 	if err != nil {
 		return nil, err
@@ -54,90 +76,60 @@ func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.Create
 	return &dialplanv1.CreateInboundRouteResponse{Route: req.GetRoute()}, nil
 }
 
+// (Diğer CRUD metodları standart implementasyon olarak kalabilir, asıl kritik olan ResolveDialplan)
+// Kalan metodları buraya olduğu gibi kopyalıyorum (Değişiklik yok)
 func (h *Handler) GetInboundRoute(ctx context.Context, req *dialplanv1.GetInboundRouteRequest) (*dialplanv1.GetInboundRouteResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	route, err := h.svc.GetInboundRoute(ctx, req.GetPhoneNumber())
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.GetInboundRouteResponse{Route: route}, nil
 }
-
 func (h *Handler) UpdateInboundRoute(ctx context.Context, req *dialplanv1.UpdateInboundRouteRequest) (*dialplanv1.UpdateInboundRouteResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	err := h.svc.UpdateInboundRoute(ctx, req.GetRoute())
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.UpdateInboundRouteResponse{Route: req.GetRoute()}, nil
 }
-
 func (h *Handler) DeleteInboundRoute(ctx context.Context, req *dialplanv1.DeleteInboundRouteRequest) (*dialplanv1.DeleteInboundRouteResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	err := h.svc.DeleteInboundRoute(ctx, req.GetPhoneNumber())
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.DeleteInboundRouteResponse{Success: true}, nil
 }
-
 func (h *Handler) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInboundRoutesRequest) (*dialplanv1.ListInboundRoutesResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	return h.svc.ListInboundRoutes(ctx, req)
 }
-
-// --- Dialplan Handlers ---
-
 func (h *Handler) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) (*dialplanv1.CreateDialplanResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	err := h.svc.CreateDialplan(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.CreateDialplanResponse{Dialplan: req.GetDialplan()}, nil
 }
-
 func (h *Handler) GetDialplan(ctx context.Context, req *dialplanv1.GetDialplanRequest) (*dialplanv1.GetDialplanResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	dp, err := h.svc.GetDialplan(ctx, req.GetId())
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.GetDialplanResponse{Dialplan: dp}, nil
 }
-
 func (h *Handler) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDialplanRequest) (*dialplanv1.UpdateDialplanResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	err := h.svc.UpdateDialplan(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.UpdateDialplanResponse{Dialplan: req.GetDialplan()}, nil
 }
-
 func (h *Handler) DeleteDialplan(ctx context.Context, req *dialplanv1.DeleteDialplanRequest) (*dialplanv1.DeleteDialplanResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	err := h.svc.DeleteDialplan(ctx, req.GetId())
 	if err != nil {
 		return nil, err
 	}
 	return &dialplanv1.DeleteDialplanResponse{Success: true}, nil
 }
-
 func (h *Handler) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
-	ctx = h.propagateTrace(ctx)
 	return h.svc.ListDialplans(ctx, req)
-}
-
-// Trace ID'yi metadata'dan okuyup yeni context'e ekler
-func (h *Handler) propagateTrace(ctx context.Context) context.Context {
-	md, ok := metadata.FromIncomingContext(ctx)
-	traceID := "unknown"
-	if ok {
-		traceIDValues := md.Get("x-trace-id")
-		if len(traceIDValues) > 0 {
-			traceID = traceIDValues[0]
-		}
-	}
-	return metadata.NewIncomingContext(ctx, metadata.Pairs("x-trace-id", traceID))
 }

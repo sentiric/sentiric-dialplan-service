@@ -24,7 +24,7 @@ type Config struct {
 	Env            string
 	LogLevel       string
 	LogFormat      string
-	NodeHostname   string
+	NodeHostname   string // YENİ: SUTS için gerekli
 	ServiceVersion string
 	DatabaseURL    string
 	UserServiceURL string
@@ -41,7 +41,7 @@ func Load() (*Config, error) {
 		Env:            getEnv("ENV", "production"),
 		LogLevel:       getEnv("LOG_LEVEL", "info"),
 		LogFormat:      getEnv("LOG_FORMAT", "json"),
-		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"),
+		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"), // Container ID veya Hostname
 		ServiceVersion: getEnv("SERVICE_VERSION", "1.0.0"),
 
 		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),

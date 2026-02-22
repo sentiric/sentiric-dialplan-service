@@ -35,8 +35,9 @@ func main() {
 	)
 
 	// SUTS v4.0 STRICT FORMAT
+	// event alanını manuel veriyoruz, attributes dictionary içinde detaylar var.
 	log.Info().
-		Str("event", "SYSTEM_STARTUP").
+		Str("event", logger.EventSystemStartup).
 		Dict("attributes", zerolog.Dict().
 			Str("commit", GitCommit).
 			Str("build_date", BuildDate)).
