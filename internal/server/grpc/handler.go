@@ -50,11 +50,11 @@ func (h *Handler) propagateTrace(ctx context.Context) context.Context {
 }
 
 func (h *Handler) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
-	// Context logger trace_id'yi otomatik alacak
 	l := logger.ContextLogger(ctx, h.log)
 
 	l.Info().
 		Str("event", logger.EventGrpcRequest).
+		Str("tenant_id", "system"). // <--- BUNU EKLEYİN
 		Dict("attributes", zerolog.Dict().
 			Str("method", "ResolveDialplan").
 			Str("caller", req.CallerContactValue).
