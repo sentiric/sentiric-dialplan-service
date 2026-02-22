@@ -7,13 +7,11 @@ import (
 	"github.com/rs/zerolog"
 	dialplanv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialplan/v1"
 	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
-	"google.golang.org/grpc/metadata"
 )
 
 // Service arayüzü... (Değişmedi)
 type Service interface {
 	ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error)
-
 	CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
 	GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error)
 	UpdateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error
@@ -37,35 +35,24 @@ func NewHandler(svc Service, log zerolog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
-// Trace ID'yi metadata'dan okuyup logger'a hazırlamak için context'i zenginleştirir.
-// Aslında ExtractTraceIDFromContext logger paketinde bunu yapıyor, ama Service katmanına
-// context ile aktarmak için metadata'yı kopyalamak gerekebilir.
-func (h *Handler) propagateTrace(ctx context.Context) context.Context {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ctx
-	}
-	// Gelen metadata'yı outgoing metadata olarak kopyala (İstemcilere iletmek için)
-	return metadata.NewOutgoingContext(ctx, md)
-}
-
 func (h *Handler) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
 	l := logger.ContextLogger(ctx, h.log)
 
+	// GÜNCELLEME: Bu log artık sadece isteğin alındığını belirtir.
+	// Henüz tenant_id bilinmediği için bu alana eklenmez.
 	l.Info().
 		Str("event", logger.EventGrpcRequest).
-		Str("tenant_id", "system"). // <--- BUNU EKLEYİN
 		Dict("attributes", zerolog.Dict().
 			Str("method", "ResolveDialplan").
 			Str("caller", req.CallerContactValue).
 			Str("destination", req.DestinationNumber)).
 		Msg("gRPC İsteği Alındı")
 
+	// İş mantığı, zenginleştirilmiş loglamayı kendisi yapacak olan servise devredilir.
 	return h.svc.ResolveDialplan(ctx, req.GetCallerContactValue(), req.GetDestinationNumber())
 }
 
-// ... Diğer handler metodları da benzer şekilde loglanabilir ...
-// Örnek: CreateInboundRoute
+// / CRUD işlemleri
 func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.CreateInboundRouteRequest) (*dialplanv1.CreateInboundRouteResponse, error) {
 	l := logger.ContextLogger(ctx, h.log)
 	l.Info().Str("event", "CRUD_OPERATION").Msg("Inbound Route oluşturuluyor")
@@ -76,8 +63,6 @@ func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.Create
 	return &dialplanv1.CreateInboundRouteResponse{Route: req.GetRoute()}, nil
 }
 
-// (Diğer CRUD metodları standart implementasyon olarak kalabilir, asıl kritik olan ResolveDialplan)
-// Kalan metodları buraya olduğu gibi kopyalıyorum (Değişiklik yok)
 func (h *Handler) GetInboundRoute(ctx context.Context, req *dialplanv1.GetInboundRouteRequest) (*dialplanv1.GetInboundRouteResponse, error) {
 	route, err := h.svc.GetInboundRoute(ctx, req.GetPhoneNumber())
 	if err != nil {

@@ -37,15 +37,12 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, userCache 
 }
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	// Trace ID'yi al (Loglama için)
-	traceID := logger.ExtractTraceIDFromContext(ctx)
-	// Context Logger oluştur
 	l := logger.ContextLogger(ctx, s.baseLog)
+	traceID := logger.ExtractTraceIDFromContext(ctx)
 
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
-	// [SUTS] Başlangıç Logu
 	l.Info().
 		Str("event", logger.EventDialplanResolveStart).
 		Dict("attributes", zerolog.Dict().
@@ -53,7 +50,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			Str("sip.destination", cleanDestination)).
 		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
-	// 1. Inbound Route Sorgusu
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -68,26 +64,24 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
-			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
+			// `buildFailsafeResponse` artık tenant_id loglamasını da yapacak.
+			return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
-		l.Error().
-			Str("event", "DB_ERROR").
-			Err(err).
-			Msg("Route sorgusu başarısız")
+		l.Error().Err(err).Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
-	// 2. Bakım Modu
+	// ... Bakım modu, Dialplan detayı ve Kullanıcı tanıma kodları aynı kalır ...
 	if route.IsMaintenanceMode {
 		l.Warn().
 			Str("event", logger.EventMaintenanceMode).
+			Str("tenant_id", route.TenantId). // <-- TENANT ID EKLENDİ
 			Dict("attributes", zerolog.Dict().
 				Str("route", route.PhoneNumber)).
 			Msg("🔧 Hat bakım modunda.")
-		return s.buildFailsafeResponse(ctx, safeString(route.FailsafeDialplanId), nil, nil, route)
+		return s.buildFailsafeResponse(ctx, l, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
-	// 3. Dialplan Detayı
 	var activePlan *dialplanv1.Dialplan
 	if route.ActiveDialplanId != nil {
 		if p, err := s.repo.FindDialplanByID(ctx, *route.ActiveDialplanId); err == nil {
@@ -95,33 +89,22 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// 4. Kullanıcı Tanıma (User Service'e Trace ID'yi ilet)
-	// Gelen context'teki trace id'yi alıp yeni outgoing context oluşturuyoruz.
-	// Bu sayede User Service'teki loglar da aynı Trace ID'ye sahip olacak.
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
-
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
 
-	// a. Önbellek Kontrolü
 	if s.userCache != nil {
 		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller, l)
 	}
 
-	// b. User Service Sorgusu (Cache Miss ise)
 	if matchedUser == nil {
-		l.Debug().
-			Str("event", logger.EventUserCacheMiss).
-			Msg("Cache miss, querying User Service")
-
+		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, User Service sorgulanıyor")
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
 				ContactType:  "phone",
 				ContactValue: cleanCaller,
 			}, opts...)
 		}
-
-		// grpchelper.CallWithTimeout ile User Service'e gidiyoruz.
 		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
 		if err == nil {
 			matchedUser = userRes.GetUser()
@@ -129,14 +112,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-			l.Warn().
-				Err(err).
-				Str("event", logger.EventUserLookupFailed).
-				Msg("Kullanıcı sorgusu başarısız veya bulunamadı")
+			l.Warn().Err(err).Str("event", logger.EventUserLookupFailed).Msg("Kullanıcı sorgusu başarısız veya bulunamadı")
 		}
 	}
 
-	// 5. Karar ve Yanıt
 	if activePlan != nil {
 		if matchedUser == nil {
 			matchedUser = &userv1.User{
@@ -147,10 +126,11 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}
 		}
 
-		// [SUTS] Başarı Logu
+		// *** ANA DEĞİŞİKLİK BURADA ***
+		// Sonuç logu, tüm verinin mevcut olduğu bu noktada atılıyor.
 		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
-			Str("tenant_id", activePlan.TenantId).
+			Str("tenant_id", activePlan.TenantId). // <-- ARTIK DOĞRU TENANT ID BURADA
 			Dict("attributes", zerolog.Dict().
 				Str("dialplan.id", activePlan.Id).
 				Str("action.type", activePlan.Action.Type.String()).
@@ -167,39 +147,35 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}, nil
 	}
 
-	return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, matchedUser, matchedContact, route)
+	return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, matchedUser, matchedContact, route)
 }
 
-func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
+func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
+	// ... Bu fonksiyonun içi aynı kalabilir, sadece loglamayı zenginleştireceğiz ...
 	if planID == "" {
 		planID = DialplanSystemFailsafe
 	}
 
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
-		// Veritabanı da yoksa hardcoded acil durum planı
 		emergencyPlan := &dialplanv1.DialplanAction{
 			Action:     ActionPlayAnnouncement,
 			Type:       dialplanv1.ActionType_ACTION_TYPE_PLAY_STATIC_ANNOUNCEMENT,
 			ActionData: map[string]string{"announcement_id": AnnouncementSystemError},
 		}
+		// Acil durum logu
+		l.Error().Str("event", "FAILSAFE_EMERGENCY").Str("tenant_id", "system").Msg("Failsafe planı bile bulunamadı, acil durum anonsu devreye girdi.")
 		return &dialplanv1.ResolveDialplanResponse{
-			DialplanId:     "EMERGENCY_MODE",
-			TenantId:       "system",
-			Action:         emergencyPlan,
-			MatchedUser:    user,
-			MatchedContact: contact,
-			InboundRoute:   route,
+			DialplanId: "EMERGENCY_MODE", TenantId: "system", Action: emergencyPlan,
+			MatchedUser: user, MatchedContact: contact, InboundRoute: route,
 		}, nil
 	}
 
+	// Failsafe logu
+	l.Warn().Str("event", "FAILSAFE_TRIGGERED").Str("tenant_id", plan.TenantId).Dict("attributes", zerolog.Dict().Str("plan.id", plan.Id)).Msg("Failsafe planı devreye girdi.")
 	return &dialplanv1.ResolveDialplanResponse{
-		DialplanId:     plan.Id,
-		TenantId:       plan.TenantId,
-		Action:         plan.Action,
-		MatchedUser:    user,
-		MatchedContact: contact,
-		InboundRoute:   route,
+		DialplanId: plan.Id, TenantId: plan.TenantId, Action: plan.Action,
+		MatchedUser: user, MatchedContact: contact, InboundRoute: route,
 	}, nil
 }
 
