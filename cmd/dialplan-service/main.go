@@ -1,3 +1,4 @@
+// sentiric-dialplan-service/cmd/dialplan-service/main.go
 package main
 
 import (
@@ -34,8 +35,6 @@ func main() {
 		cfg.LogFormat,
 	)
 
-	// SUTS v4.0 STRICT FORMAT
-	// event alanını manuel veriyoruz, attributes dictionary içinde detaylar var.
 	log.Info().
 		Str("event", logger.EventSystemStartup).
 		Dict("attributes", zerolog.Dict().

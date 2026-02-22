@@ -24,7 +24,7 @@ type Config struct {
 	Env            string
 	LogLevel       string
 	LogFormat      string
-	NodeHostname   string // YENİ: SUTS için gerekli
+	NodeHostname   string
 	ServiceVersion string
 	DatabaseURL    string
 	UserServiceURL string
@@ -34,20 +34,17 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	// Sessiz yükleme (Gürültü yapmaması için log kaldırıldı)
 	_ = godotenv.Load()
 
 	cfg := &Config{
 		Env:            getEnv("ENV", "production"),
 		LogLevel:       getEnv("LOG_LEVEL", "info"),
 		LogFormat:      getEnv("LOG_FORMAT", "json"),
-		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"), // Container ID veya Hostname
+		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"),
 		ServiceVersion: getEnv("SERVICE_VERSION", "1.0.0"),
-
 		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),
 		UserServiceURL: getEnvOrFail("USER_SERVICE_TARGET_GRPC_URL"),
 		RedisURL:       getEnv("REDIS_URL", "redis://redis.service.sentiric.cloud:6379/0"),
-
 		Server: ServerConfig{
 			HttpPort:    getEnv("DIALPLAN_SERVICE_HTTP_PORT", "12020"),
 			GRPCPort:    getEnv("DIALPLAN_SERVICE_GRPC_PORT", "12021"),
@@ -59,7 +56,6 @@ func Load() (*Config, error) {
 			CaPath:   getEnvOrFail("GRPC_TLS_CA_PATH"),
 		},
 	}
-
 	return cfg, nil
 }
 
