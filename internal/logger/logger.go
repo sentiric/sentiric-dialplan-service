@@ -1,4 +1,4 @@
-// internal/logger/logger.go
+// sentiric-dialplan-service/internal/logger/logger.go
 package logger
 
 import (
@@ -16,56 +16,96 @@ const (
 	DefaultTenant = "system"
 )
 
-// New: SUTS v4.0 uyumlu Logger oluşturur. Hook yapısı kaldırıldı, With() ile context kuruldu.
+// SutsHook: Her log satırına SUTS zorunlu alanlarını ekler.
+type SutsHook struct {
+	Resource map[string]string
+}
+
+func (h SutsHook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
+	// 1. Governance
+	e.Str("schema_v", SchemaVersion)
+
+	// 2. Resource (Nested Object)
+	dict := zerolog.Dict()
+	for k, v := range h.Resource {
+		dict.Str(k, v)
+	}
+	e.Dict("resource", dict)
+}
+
+// New: SUTS v4.0 uyumlu Logger oluşturur.
 func New(serviceName, version, env, hostname, logLevel, logFormat string) zerolog.Logger {
+	var logger zerolog.Logger
+
+	// Log Seviyesini Parse Et
 	level, err := zerolog.ParseLevel(logLevel)
 	if err != nil {
 		level = zerolog.InfoLevel
 	}
 
-	// SUTS Alan Adı Değişiklikleri
-	zerolog.TimeFieldFormat = time.RFC3339Nano
+	// --- ZEROLOG GLOBAL AYARLARI (SUTS v4.0 DÖNÜŞÜMÜ) ---
+	zerolog.TimeFieldFormat = time.RFC3339Nano // SUTS milisaniye hassasiyeti sever
 	zerolog.TimestampFieldName = "ts"
 	zerolog.LevelFieldName = "severity"
 	zerolog.MessageFieldName = "message"
 
-	// Severity Değerlerini Büyük Harf Yap
+	// Severity değerlerini Uppercase yap (info -> INFO)
 	zerolog.LevelFieldMarshalFunc = func(l zerolog.Level) string {
 		return strings.ToUpper(l.String())
 	}
 
-	// Statik SUTS alanlarını baştan tanımla
-	resourceContext := zerolog.Dict().
-		Str("service.name", serviceName).
-		Str("service.version", version).
-		Str("service.env", env).
-		Str("host.name", hostname)
-
-	var logger zerolog.Logger
+	// Resource Context Hazırla
+	resource := map[string]string{
+		"service.name":    serviceName,
+		"service.version": version,
+		"service.env":     env,
+		"host.name":       hostname,
+	}
 
 	if logFormat == "json" {
-		// Production: JSON formatı. Hook yerine With() kullanılıyor.
-		logger = zerolog.New(os.Stderr).With().
+		// Production: JSON + SUTS Hook
+		logger = zerolog.New(os.Stderr).
+			Hook(SutsHook{Resource: resource}).
+			With().
 			Timestamp().
-			Str("schema_v", SchemaVersion).
-			Dict("resource", resourceContext).
 			Logger()
 	} else {
-		// Development: Okunabilir konsol çıktısı
-		output := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-		logger = zerolog.New(output).With().Timestamp().Str("service", serviceName).Logger()
+		// Development: Renkli Console
+		output := zerolog.ConsoleWriter{
+			Out:        os.Stderr,
+			TimeFormat: time.RFC3339,
+		}
+		// Dev modunda bile temel alanları görelim
+		logger = zerolog.New(output).
+			With().
+			Timestamp().
+			Str("service", serviceName).
+			Logger()
 	}
 
 	return logger.Level(level)
 }
 
-// ContextLogger: gRPC context'inden trace_id'yi alıp logger'a ekler.
-func ContextLogger(ctx context.Context, baseLog zerolog.Logger) zerolog.Logger {
+// ExtractTraceIDFromContext: gRPC Metadata'dan trace_id çeker.
+// Servis katmanında Context Propagation için Public yapıldı.
+func ExtractTraceIDFromContext(ctx context.Context) string {
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		// İstek başlıklarında "x-trace-id" veya "trace-id" ara
 		if vals := md.Get("x-trace-id"); len(vals) > 0 && vals[0] != "" {
-			return baseLog.With().Str("trace_id", vals[0]).Logger()
+			return vals[0]
+		}
+		if vals := md.Get("trace_id"); len(vals) > 0 && vals[0] != "" {
+			return vals[0]
 		}
 	}
-	// Trace ID yoksa bile log atmaya devam et ama alanı ekleme
+	return "unknown"
+}
+
+// ContextLogger: Trace ID ile zenginleştirilmiş logger döndürür.
+func ContextLogger(ctx context.Context, baseLog zerolog.Logger) zerolog.Logger {
+	traceID := ExtractTraceIDFromContext(ctx)
+	if traceID != "unknown" {
+		return baseLog.With().Str("trace_id", traceID).Logger()
+	}
 	return baseLog
 }

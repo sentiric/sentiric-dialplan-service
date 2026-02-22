@@ -20,7 +20,6 @@ func toPtr(s string) *string {
 }
 
 // MapStringToActionType: Veritabanındaki string aksiyonu Protobuf Enum'a çevirir.
-// Bu fonksiyon, B2BUA servisindeki "invalid wire type" hatasını çözer.
 func MapStringToActionType(action string) dialplanv1.ActionType {
 	switch strings.ToUpper(action) {
 	case "START_AI_CONVERSATION":
