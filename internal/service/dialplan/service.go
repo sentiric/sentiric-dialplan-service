@@ -41,8 +41,10 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, userCache 
 }
 
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
-	traceID := logger.ExtractTraceIDFromContext(ctx)
+	// DÜZELTME: logger.ExtractTraceIDFromContext çağrısı kaldırıldı.
+	// ContextLogger bu işi kendi içinde yapacak.
 	l := logger.ContextLogger(ctx, s.baseLog)
+
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
@@ -58,7 +60,8 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		if errors.Is(err, ErrNotFound) {
 			l.Warn().
 				Str("event", logger.EventRouteNotFound).
-				Dict("attributes", zerolog.Dict().Str("sip.destination", cleanDestination)).
+				Dict("attributes", zerolog.Dict().
+					Str("sip.destination", cleanDestination)).
 				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
 			guestRoute := &dialplanv1.InboundRoute{PhoneNumber: cleanDestination, TenantId: "system", DefaultLanguageCode: "tr"}
 			return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
@@ -82,7 +85,14 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
+	// DÜZELTME: Trace ID'yi manuel olarak çıkarmadan doğrudan context'i iletiyoruz.
+	userReqCtx := metadata.NewOutgoingContext(ctx, metadata.MD{})
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("x-trace-id"); len(vals) > 0 {
+			userReqCtx = metadata.AppendToOutgoingContext(userReqCtx, "x-trace-id", vals[0])
+		}
+	}
+
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
 
@@ -129,9 +139,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	return s.buildFailsafeResponse(ctx, DialplanSystemWelcomeGuest, matchedUser, matchedContact, route)
 }
 
-// ... Diğer metodlar aynı kalır, sadece loglama güncellenir
-// (Diğer CRUD metodları için loglama eklenmesi bu fazın dışındadır, ancak ResolveDialplan kritiktir)
-// ...
 func (s *Service) buildFailsafeResponse(ctx context.Context, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
 	if planID == "" {
 		planID = DialplanSystemFailsafe
@@ -262,3 +269,14 @@ func (s *Service) serializeActionData(dp *dialplanv1.Dialplan) ([]byte, error) {
 	}
 	return []byte("{}"), nil
 }
+func (s *Service) toPtr(str string) *string {
+	return &str
+}
+func (s *Service) safeString(str *string) string {
+	if str == nil {
+		return ""
+	}
+	return *str
+}
+
+// (normalizePhoneNumber ve extractUserPart fonksiyonları aynı kalır)
