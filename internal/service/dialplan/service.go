@@ -23,6 +23,8 @@ const (
 	DialplanSystemWelcomeGuest = "DP_SYSTEM_AI_GUEST"
 	ActionPlayAnnouncement     = "PLAY_ANNOUNCEMENT"
 	AnnouncementSystemError    = "ANNOUNCE_SYSTEM_ERROR"
+	// [YENİ]: Standart Nil UUID (PostgreSQL UUID tipi için zorunlu)
+	NilUUID = "00000000-0000-0000-0000-000000000000"
 )
 
 type Service struct {
@@ -64,18 +66,16 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				TenantId:            "system",
 				DefaultLanguageCode: "tr",
 			}
-			// `buildFailsafeResponse` artık tenant_id loglamasını da yapacak.
 			return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
 		l.Error().Err(err).Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
-	// ... Bakım modu, Dialplan detayı ve Kullanıcı tanıma kodları aynı kalır ...
 	if route.IsMaintenanceMode {
 		l.Warn().
 			Str("event", logger.EventMaintenanceMode).
-			Str("tenant_id", route.TenantId). // <-- TENANT ID EKLENDİ
+			Str("tenant_id", route.TenantId).
 			Dict("attributes", zerolog.Dict().
 				Str("route", route.PhoneNumber)).
 			Msg("🔧 Hat bakım modunda.")
@@ -118,23 +118,29 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 
 	if activePlan != nil {
 		if matchedUser == nil {
+			// [FIX]: Misafir kullanıcı oluşturulurken UUID formatına uyuluyor.
+			l.Info().
+				Str("event", "GUEST_USER_CREATED").
+				Str("caller", cleanCaller).
+				Msg("Bilinmeyen numara için geçici misafir kimliği (Nil UUID) oluşturuluyor.")
+
 			matchedUser = &userv1.User{
-				Id:       "anonymous",
+				Id:       NilUUID, // "anonymous" yerine 0000...
 				Name:     toPtr("Misafir Kullanıcı"),
 				TenantId: route.TenantId,
 				UserType: "caller",
 			}
 		}
 
-		// *** ANA DEĞİŞİKLİK BURADA ***
-		// Sonuç logu, tüm verinin mevcut olduğu bu noktada atılıyor.
+		// Sonuç logu
 		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
-			Str("tenant_id", activePlan.TenantId). // <-- ARTIK DOĞRU TENANT ID BURADA
+			Str("tenant_id", activePlan.TenantId).
 			Dict("attributes", zerolog.Dict().
 				Str("dialplan.id", activePlan.Id).
 				Str("action.type", activePlan.Action.Type.String()).
-				Str("action", activePlan.Action.GetAction())).
+				Str("action", activePlan.Action.GetAction()).
+				Str("user.id", matchedUser.Id)).
 			Msg("✅ Dialplan başarıyla çözüldü")
 
 		return &dialplanv1.ResolveDialplanResponse{
@@ -151,7 +157,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 }
 
 func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, planID string, user *userv1.User, contact *userv1.Contact, route *dialplanv1.InboundRoute) (*dialplanv1.ResolveDialplanResponse, error) {
-	// ... Bu fonksiyonun içi aynı kalabilir, sadece loglamayı zenginleştireceğiz ...
 	if planID == "" {
 		planID = DialplanSystemFailsafe
 	}
@@ -179,7 +184,7 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	}, nil
 }
 
-// --- CRUD Operations (Basic SUTS Instrumentation) ---
+// --- CRUD Operations ---
 
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	l := logger.ContextLogger(ctx, s.baseLog)
