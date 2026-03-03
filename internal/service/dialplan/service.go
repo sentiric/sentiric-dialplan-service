@@ -109,9 +109,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		if err == nil && userRes.GetUser() != nil {
 			matchedUser = userRes.GetUser()
 
-			// [KRİTİK DÜZELTME]: Gelen User objesinden ilgili Contact ID'yi bul
+			// [KRİTİK DÜZELTME]: Veritabanından gelen numaranın formatını da temizle (Örn: +90 -> 90)
 			for _, contact := range matchedUser.Contacts {
-				if contact.ContactValue == cleanCaller {
+				dbContactClean := normalizePhoneNumber(contact.ContactValue)
+				if dbContactClean == cleanCaller {
 					matchedContact = contact
 					break
 				}
@@ -124,9 +125,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			l.Warn().Err(err).Str("event", logger.EventUserLookupFailed).Msg("Kullanıcı sorgusu başarısız veya bulunamadı")
 		}
 	} else {
-		// Cache'den geldiyse de contact'ı bul
+		// [KRİTİK DÜZELTME]: Cache'den gelse bile numarayı temizleyerek kıyasla
 		for _, contact := range matchedUser.Contacts {
-			if contact.ContactValue == cleanCaller {
+			dbContactClean := normalizePhoneNumber(contact.ContactValue)
+			if dbContactClean == cleanCaller {
 				matchedContact = contact
 				break
 			}
