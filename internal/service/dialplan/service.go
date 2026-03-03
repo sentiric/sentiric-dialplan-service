@@ -106,13 +106,30 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}, opts...)
 		}
 		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
-		if err == nil {
+		if err == nil && userRes.GetUser() != nil {
 			matchedUser = userRes.GetUser()
-			if s.userCache != nil && matchedUser != nil {
+
+			// [KRİTİK DÜZELTME]: Gelen User objesinden ilgili Contact ID'yi bul
+			for _, contact := range matchedUser.Contacts {
+				if contact.ContactValue == cleanCaller {
+					matchedContact = contact
+					break
+				}
+			}
+
+			if s.userCache != nil {
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
 			l.Warn().Err(err).Str("event", logger.EventUserLookupFailed).Msg("Kullanıcı sorgusu başarısız veya bulunamadı")
+		}
+	} else {
+		// Cache'den geldiyse de contact'ı bul
+		for _, contact := range matchedUser.Contacts {
+			if contact.ContactValue == cleanCaller {
+				matchedContact = contact
+				break
+			}
 		}
 	}
 
