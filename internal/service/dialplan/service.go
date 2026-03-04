@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ... Sabitler (Değişmedi) ...
+// ... Sabitler ...
 const (
 	DialplanSystemFailsafe     = "DP_SYSTEM_FAILSAFE"
 	DialplanSystemWelcomeGuest = "DP_SYSTEM_AI_GUEST"
@@ -77,27 +77,49 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
-	// [YENİ KONTROL]: Anonim Çağrı Engelleme
+	// 2. [GÜVENLİK] Anonim Çağrı Engelleme
 	if route.BlockAnonymous && (cleanCaller == "" || cleanCaller == "anonymous") {
 		l.Warn().Str("event", "ANONYMOUS_BLOCKED").Msg("🚫 Gizli numara engellendi.")
 		return nil, status.Errorf(codes.PermissionDenied, "Anonymous calls blocked")
 	}
 
-	// [YENİ KONTROL]: Bakım Modu
+	// 3. [KONTROL] Bakım Modu
 	if route.IsMaintenanceMode {
 		l.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
 		return s.buildFailsafeResponse(ctx, l, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
-	// 2. Aktif Dialplan'ı Çek
+	// 4. [MANTIK] Zamanlama / Mesai Kontrolü (Scheduler)
+	targetDialplanID := route.ActiveDialplanId
+
+	if route.ScheduleId != nil && *route.ScheduleId != "" {
+		schedule, err := s.repo.GetSchedule(ctx, *route.ScheduleId)
+		if err == nil {
+			// ScheduleEvaluator modülünü kullan
+			isOpen := IsWorkingHour(schedule.ScheduleJson)
+
+			if !isOpen {
+				l.Info().Str("schedule", schedule.Name).Msg("🌙 Mesai dışı (Off-Hours) kuralı devrede.")
+				if route.OffHoursDialplanId != nil && *route.OffHoursDialplanId != "" {
+					targetDialplanID = route.OffHoursDialplanId
+				}
+			} else {
+				l.Debug().Str("schedule", schedule.Name).Msg("☀️ Mesai içi (Working-Hours) kuralı devrede.")
+			}
+		} else {
+			l.Warn().Err(err).Str("schedule_id", *route.ScheduleId).Msg("Zamanlama planı yüklenemedi, varsayılan akışa devam ediliyor.")
+		}
+	}
+
+	// 5. Aktif Dialplan'ı Çek
 	var activePlan *dialplanv1.Dialplan
-	if route.ActiveDialplanId != nil {
-		if p, err := s.repo.FindDialplanByID(ctx, *route.ActiveDialplanId); err == nil {
+	if targetDialplanID != nil {
+		if p, err := s.repo.FindDialplanByID(ctx, *targetDialplanID); err == nil {
 			activePlan = p
 		}
 	}
 
-	// 3. Arayan Kim? (User Service)
+	// 6. Arayan Kim? (User Service)
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
@@ -131,10 +153,11 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-			l.Warn().Err(err).Msg("Kullanıcı bulunamadı")
+			// Hata değil, sadece bilinmeyen numara
+			l.Debug().Err(err).Msg("Kullanıcı tanınamadı (Bilinmeyen Numara)")
 		}
 	} else {
-		// Cache'den geldiyse de contact'ı bul
+		// Cache'den geldiyse contact'ı bul
 		for _, contact := range matchedUser.Contacts {
 			if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
 				matchedContact = contact
@@ -157,6 +180,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
 			Str("dialplan.id", activePlan.Id).
+			Str("dialplan.action", activePlan.Action.Action).
 			Msg("✅ Dialplan başarıyla çözüldü")
 
 		return &dialplanv1.ResolveDialplanResponse{
@@ -178,7 +202,6 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	}
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
-		// En kötü senaryo: Veritabanında failsafe planı bile yoksa hardcoded bir acil durum planı dön.
 		l.Error().Msg("❌ CRITICAL: Failsafe plan DB'de yok!")
 		return nil, status.Errorf(codes.Internal, "System Error: Failsafe plan missing")
 	}
@@ -188,8 +211,7 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	}, nil
 }
 
-// --- CRUD Pass-through (Basitleştirilmiş) ---
-
+// ... CRUD metodları aynı kalır ...
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	return s.repo.CreateInboundRoute(ctx, route)
@@ -215,9 +237,7 @@ func (s *Service) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInb
 	return &dialplanv1.ListInboundRoutesResponse{Routes: list, TotalCount: count}, nil
 }
 
-// --- Dialplan CRUD ---
 func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) error {
-	// ActionData map'ini JSON byte'a çevirip kaydet
 	bytes, _ := json.Marshal(req.Dialplan.Action.ActionData)
 	return s.repo.CreateDialplan(ctx, req.Dialplan, bytes)
 }
@@ -242,7 +262,6 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 	return &dialplanv1.ListDialplansResponse{Dialplans: list, TotalCount: count}, nil
 }
 
-// --- [YENİ] Queue CRUD Pass-through ---
 func (s *Service) CreateQueue(ctx context.Context, req *dialplanv1.CreateQueueRequest) error {
 	return s.repo.CreateQueue(ctx, req.Queue)
 }
@@ -266,7 +285,6 @@ func (s *Service) ListQueues(ctx context.Context, req *dialplanv1.ListQueuesRequ
 	return &dialplanv1.ListQueuesResponse{Queues: list, TotalCount: count}, nil
 }
 
-// --- [YENİ] Schedule CRUD ---
 func (s *Service) CreateSchedule(ctx context.Context, req *dialplanv1.CreateScheduleRequest) error {
 	return s.repo.CreateSchedule(ctx, req.Schedule)
 }

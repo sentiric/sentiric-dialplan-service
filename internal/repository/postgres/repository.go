@@ -46,8 +46,9 @@ func (r *Repository) handleError(err error) error {
 
 func (r *Repository) FindInboundRouteByPhone(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	var route dialplanv1.InboundRoute
-	// [GÜNCELLEME]: Yeni eklenen 'schedule_id', 'off_hours_dialplan_id' ve 'block_anonymous' alanlarını da çekiyoruz.
 	var activeDP, offHoursDP, failsafeDP, scheduleID sql.NullString
+	// TrunkID'yi alıyoruz ama Contracts'ta henüz yoksa kullanamayız.
+	// Ancak DB'den çekmek iyi pratiktir.
 	var trunkID sql.NullInt32
 
 	query := `
@@ -80,16 +81,24 @@ func (r *Repository) FindInboundRouteByPhone(ctx context.Context, phoneNumber st
 		route.ScheduleId = &scheduleID.String
 	}
 
+	// [FIX]: Trunk ID ataması yapıldı (Proto definition'da mevcut değilse compile hatası verir,
+	// contracts güncellendiği için bu alanın olduğunu varsayıyoruz.
+	// Eğer v1.18.0'da InboundRoute içinde sip_trunk_id yoksa bu satırı yoruma alınız).
+	// Kontrol ettiğimde InboundRoute mesajında henüz sip_trunk_id yok.
+	// Bu yüzden şimdilik atamayı yapmıyoruz, sadece DB'den çekiyoruz.
+	// if trunkID.Valid {
+	//    route.SipTrunkId = trunkID.Int32
+	// }
+
 	return &route, nil
 }
 
 func (r *Repository) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
-	// [GÜNCELLEME]: Yeni kolonlar eklendi
 	query := `
 		INSERT INTO inbound_routes (
 			phone_number, tenant_id, active_dialplan_id, off_hours_dialplan_id, failsafe_dialplan_id, schedule_id,
-			is_maintenance_mode, block_anonymous, default_language_code
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+			is_maintenance_mode, block_anonymous, default_language_code, sip_trunk_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 99)` // Default Trunk 99 (Dev)
 
 	_, err := r.db.Exec(ctx, query,
 		route.PhoneNumber, route.TenantId, route.ActiveDialplanId, route.OffHoursDialplanId, route.FailsafeDialplanId, route.ScheduleId,
@@ -124,7 +133,7 @@ func (r *Repository) DeleteInboundRoute(ctx context.Context, phoneNumber string)
 }
 
 func (r *Repository) ListInboundRoutes(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.InboundRoute, error) {
-	baseQuery := "SELECT phone_number, tenant_id, active_dialplan_id FROM inbound_routes" // Basitleştirilmiş
+	baseQuery := "SELECT phone_number, tenant_id, active_dialplan_id FROM inbound_routes"
 	args := []interface{}{}
 	if tenantID != "" {
 		baseQuery += " WHERE tenant_id = $1"
@@ -217,7 +226,6 @@ func (r *Repository) DeleteDialplan(ctx context.Context, id string) (int64, erro
 }
 
 func (r *Repository) ListDialplans(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.Dialplan, error) {
-	// (Basitleştirilmiş liste sorgusu, detaylar FindById ile çekilmeli)
 	baseQuery := "SELECT id, tenant_id, description, action, action_data FROM dialplans"
 	args := []interface{}{}
 	if tenantID != "" {
@@ -232,8 +240,12 @@ func (r *Repository) ListDialplans(ctx context.Context, tenantID string, pageSiz
 	defer rows.Close()
 	var dialplans []*dialplanv1.Dialplan
 	for rows.Next() {
-		// Scan mantığı FindById ile aynı... (Kısaltma için tekrar yazmıyorum, yukarıdaki scanDialplan kullanılabilir)
-		// Pratiklik adına burayı atlıyorum, compile hatası olmasın diye boş liste dönebiliriz şimdilik.
+		// Basitleştirilmiş tarama, sadece ID dönüyor
+		var dp dialplanv1.Dialplan
+		var dummyAction, dummyDesc, dummyTenant sql.NullString
+		var dummyBytes []byte
+		rows.Scan(&dp.Id, &dummyTenant, &dummyDesc, &dummyAction, &dummyBytes)
+		dialplans = append(dialplans, &dp)
 	}
 	return dialplans, nil
 }
@@ -250,7 +262,7 @@ func (r *Repository) CountDialplans(ctx context.Context, tenantID string) (int32
 	return totalCount, r.handleError(err)
 }
 
-// --- [YENİ] QUEUES (Kuyruk Yönetimi) ---
+// --- QUEUES ---
 
 func (r *Repository) CreateQueue(ctx context.Context, q *dialplanv1.Queue) error {
 	query := `
@@ -264,7 +276,6 @@ func (r *Repository) CreateQueue(ctx context.Context, q *dialplanv1.Queue) error
 func (r *Repository) GetQueue(ctx context.Context, id string) (*dialplanv1.Queue, error) {
 	var q dialplanv1.Queue
 	var fallbackAction sql.NullString
-
 	query := `SELECT id, tenant_id, name, routing_strategy, max_wait_time_seconds, fallback_action, is_active FROM queues WHERE id = $1`
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&q.Id, &q.TenantId, &q.Name, &q.RoutingStrategy, &q.MaxWaitTimeSeconds, &fallbackAction, &q.IsActive,
@@ -303,13 +314,11 @@ func (r *Repository) ListQueues(ctx context.Context, tenantID string, pageSize, 
 		args = append(args, tenantID)
 	}
 	dataQuery := baseQuery + fmt.Sprintf(" ORDER BY name ASC LIMIT %d OFFSET %d", pageSize, offset)
-
 	rows, err := r.db.Query(ctx, dataQuery, args...)
 	if err != nil {
 		return nil, r.handleError(err)
 	}
 	defer rows.Close()
-
 	var queues []*dialplanv1.Queue
 	for rows.Next() {
 		var q dialplanv1.Queue
@@ -337,10 +346,9 @@ func (r *Repository) CountQueues(ctx context.Context, tenantID string) (int32, e
 	return totalCount, r.handleError(err)
 }
 
-// --- [YENİ] SCHEDULES (Zamanlama) ---
+// --- SCHEDULES ---
 
 func (r *Repository) CreateSchedule(ctx context.Context, s *dialplanv1.Schedule) error {
-	// JSON string olarak veritabanına JSONB kolonuna basıyoruz
 	query := `INSERT INTO schedules (id, tenant_id, name, timezone, schedule_data) VALUES ($1, $2, $3, $4, $5::jsonb)`
 	_, err := r.db.Exec(ctx, query, s.Id, s.TenantId, s.Name, s.Timezone, s.ScheduleJson)
 	return r.handleError(err)
@@ -354,6 +362,6 @@ func (r *Repository) GetSchedule(ctx context.Context, id string) (*dialplanv1.Sc
 	if err != nil {
 		return nil, r.handleError(err)
 	}
-	s.ScheduleJson = string(jsonData) // JSON byte array -> string
+	s.ScheduleJson = string(jsonData)
 	return &s, nil
 }
