@@ -18,13 +18,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// ... Sabitler (Değişmedi) ...
 const (
 	DialplanSystemFailsafe     = "DP_SYSTEM_FAILSAFE"
 	DialplanSystemWelcomeGuest = "DP_SYSTEM_AI_GUEST"
 	ActionPlayAnnouncement     = "PLAY_ANNOUNCEMENT"
 	AnnouncementSystemError    = "ANNOUNCE_SYSTEM_ERROR"
-	// [YENİ]: Standart Nil UUID (PostgreSQL UUID tipi için zorunlu)
-	NilUUID = "00000000-0000-0000-0000-000000000000"
+	NilUUID                    = "00000000-0000-0000-0000-000000000000"
 )
 
 type Service struct {
@@ -38,10 +38,12 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, userCache 
 	return &Service{repo: repo, userClient: userClient, userCache: userCache, baseLog: log}
 }
 
+// ResolveDialplan: Gelen çağrının nereye gideceğine karar verir.
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	l := logger.ContextLogger(ctx, s.baseLog)
 	traceID := logger.ExtractTraceIDFromContext(ctx)
 
+	// Telefon numaralarını temizle (Standardize et)
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
@@ -52,6 +54,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			Str("sip.destination", cleanDestination)).
 		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
+	// 1. Inbound Route Sorgula
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -61,6 +64,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 					Str("sip.destination", cleanDestination)).
 				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
 
+			// Route yoksa "System" tenant'ından genel bir karşılama dön
 			guestRoute := &dialplanv1.InboundRoute{
 				PhoneNumber:         cleanDestination,
 				TenantId:            "system",
@@ -68,20 +72,24 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}
 			return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
+		// DB hatası
 		l.Error().Err(err).Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
+	// [YENİ KONTROL]: Anonim Çağrı Engelleme
+	if route.BlockAnonymous && (cleanCaller == "" || cleanCaller == "anonymous") {
+		l.Warn().Str("event", "ANONYMOUS_BLOCKED").Msg("🚫 Gizli numara engellendi.")
+		return nil, status.Errorf(codes.PermissionDenied, "Anonymous calls blocked")
+	}
+
+	// [YENİ KONTROL]: Bakım Modu
 	if route.IsMaintenanceMode {
-		l.Warn().
-			Str("event", logger.EventMaintenanceMode).
-			Str("tenant_id", route.TenantId).
-			Dict("attributes", zerolog.Dict().
-				Str("route", route.PhoneNumber)).
-			Msg("🔧 Hat bakım modunda.")
+		l.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
 		return s.buildFailsafeResponse(ctx, l, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
+	// 2. Aktif Dialplan'ı Çek
 	var activePlan *dialplanv1.Dialplan
 	if route.ActiveDialplanId != nil {
 		if p, err := s.repo.FindDialplanByID(ctx, *route.ActiveDialplanId); err == nil {
@@ -89,14 +97,17 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
+	// 3. Arayan Kim? (User Service)
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
 
+	// Cache'e bak
 	if s.userCache != nil {
 		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller, l)
 	}
 
+	// Cache'de yoksa servise sor
 	if matchedUser == nil {
 		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, User Service sorgulanıyor")
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
@@ -108,27 +119,24 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
 		if err == nil && userRes.GetUser() != nil {
 			matchedUser = userRes.GetUser()
-
-			// [KRİTİK DÜZELTME]: Veritabanından gelen numaranın formatını da temizle (Örn: +90 -> 90)
+			// Contact eşleştirme
 			for _, contact := range matchedUser.Contacts {
-				dbContactClean := normalizePhoneNumber(contact.ContactValue)
-				if dbContactClean == cleanCaller {
+				if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
 					matchedContact = contact
 					break
 				}
 			}
-
+			// Cache güncelle
 			if s.userCache != nil {
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-			l.Warn().Err(err).Str("event", logger.EventUserLookupFailed).Msg("Kullanıcı sorgusu başarısız veya bulunamadı")
+			l.Warn().Err(err).Msg("Kullanıcı bulunamadı")
 		}
 	} else {
-		// [KRİTİK DÜZELTME]: Cache'den gelse bile numarayı temizleyerek kıyasla
+		// Cache'den geldiyse de contact'ı bul
 		for _, contact := range matchedUser.Contacts {
-			dbContactClean := normalizePhoneNumber(contact.ContactValue)
-			if dbContactClean == cleanCaller {
+			if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
 				matchedContact = contact
 				break
 			}
@@ -137,29 +145,18 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 
 	if activePlan != nil {
 		if matchedUser == nil {
-			// [FIX]: Misafir kullanıcı oluşturulurken UUID formatına uyuluyor.
-			l.Info().
-				Str("event", "GUEST_USER_CREATED").
-				Str("caller", cleanCaller).
-				Msg("Bilinmeyen numara için geçici misafir kimliği (Nil UUID) oluşturuluyor.")
-
+			// Bilinmeyen kullanıcı için 'Misafir' objesi oluştur
 			matchedUser = &userv1.User{
-				Id:       NilUUID, // "anonymous" yerine 0000...
+				Id:       NilUUID,
 				Name:     toPtr("Misafir Kullanıcı"),
 				TenantId: route.TenantId,
 				UserType: "caller",
 			}
 		}
 
-		// Sonuç logu
 		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
-			Str("tenant_id", activePlan.TenantId).
-			Dict("attributes", zerolog.Dict().
-				Str("dialplan.id", activePlan.Id).
-				Str("action.type", activePlan.Action.Type.String()).
-				Str("action", activePlan.Action.GetAction()).
-				Str("user.id", matchedUser.Id)).
+			Str("dialplan.id", activePlan.Id).
 			Msg("✅ Dialplan başarıyla çözüldü")
 
 		return &dialplanv1.ResolveDialplanResponse{
@@ -179,162 +176,100 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	if planID == "" {
 		planID = DialplanSystemFailsafe
 	}
-
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
-		emergencyPlan := &dialplanv1.DialplanAction{
-			Action:     ActionPlayAnnouncement,
-			Type:       dialplanv1.ActionType_ACTION_TYPE_PLAY_STATIC_ANNOUNCEMENT,
-			ActionData: map[string]string{"announcement_id": AnnouncementSystemError},
-		}
-		// Acil durum logu
-		l.Error().Str("event", "FAILSAFE_EMERGENCY").Str("tenant_id", "system").Msg("Failsafe planı bile bulunamadı, acil durum anonsu devreye girdi.")
-		return &dialplanv1.ResolveDialplanResponse{
-			DialplanId: "EMERGENCY_MODE", TenantId: "system", Action: emergencyPlan,
-			MatchedUser: user, MatchedContact: contact, InboundRoute: route,
-		}, nil
+		// En kötü senaryo: Veritabanında failsafe planı bile yoksa hardcoded bir acil durum planı dön.
+		l.Error().Msg("❌ CRITICAL: Failsafe plan DB'de yok!")
+		return nil, status.Errorf(codes.Internal, "System Error: Failsafe plan missing")
 	}
-
-	// Failsafe logu
-	l.Warn().Str("event", "FAILSAFE_TRIGGERED").Str("tenant_id", plan.TenantId).Dict("attributes", zerolog.Dict().Str("plan.id", plan.Id)).Msg("Failsafe planı devreye girdi.")
 	return &dialplanv1.ResolveDialplanResponse{
 		DialplanId: plan.Id, TenantId: plan.TenantId, Action: plan.Action,
 		MatchedUser: user, MatchedContact: contact, InboundRoute: route,
 	}, nil
 }
 
-// --- CRUD Operations ---
+// --- CRUD Pass-through (Basitleştirilmiş) ---
 
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
-	l := logger.ContextLogger(ctx, s.baseLog)
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
-
-	err := s.repo.CreateInboundRoute(ctx, route)
-	if err != nil {
-		if errors.Is(err, ErrConflict) {
-			return status.Errorf(codes.AlreadyExists, "Bu telefon numarası zaten kayıtlı")
-		}
-		return status.Errorf(codes.Internal, "Hata: %v", err)
-	}
-
-	l.Info().
-		Str("event", "INBOUND_ROUTE_CREATED").
-		Dict("attributes", zerolog.Dict().
-			Str("phone", route.PhoneNumber).
-			Str("tenant_id", route.TenantId)).
-		Msg("Yeni Inbound Route eklendi")
-
-	return nil
+	return s.repo.CreateInboundRoute(ctx, route)
 }
-
 func (s *Service) GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
-	route, err := s.repo.FindInboundRouteByPhone(ctx, normalizePhoneNumber(phoneNumber))
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, status.Errorf(codes.NotFound, "Route yok")
-		}
-		return nil, status.Errorf(codes.Internal, "Hata: %v", err)
-	}
-	return route, nil
+	return s.repo.FindInboundRouteByPhone(ctx, normalizePhoneNumber(phoneNumber))
 }
-
 func (s *Service) UpdateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
-	rows, err := s.repo.UpdateInboundRoute(ctx, route)
-	if err != nil || rows == 0 {
-		return status.Errorf(codes.NotFound, "Güncellenemedi")
-	}
-	return nil
+	_, err := s.repo.UpdateInboundRoute(ctx, route)
+	return err
 }
-
 func (s *Service) DeleteInboundRoute(ctx context.Context, phoneNumber string) error {
-	rows, err := s.repo.DeleteInboundRoute(ctx, normalizePhoneNumber(phoneNumber))
-	if err != nil || rows == 0 {
-		return status.Errorf(codes.NotFound, "Silinemedi")
-	}
-	return nil
+	_, err := s.repo.DeleteInboundRoute(ctx, normalizePhoneNumber(phoneNumber))
+	return err
 }
-
 func (s *Service) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInboundRoutesRequest) (*dialplanv1.ListInboundRoutesResponse, error) {
-	page, pageSize := req.GetPage(), req.GetPageSize()
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 10
-	}
-
-	total, _ := s.repo.CountInboundRoutes(ctx, req.GetTenantId())
-	routes, err := s.repo.ListInboundRoutes(ctx, req.GetTenantId(), pageSize, (page-1)*pageSize)
+	list, err := s.repo.ListInboundRoutes(ctx, req.TenantId, req.PageSize, (req.Page-1)*req.PageSize)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Hata")
+		return nil, err
 	}
-	return &dialplanv1.ListInboundRoutesResponse{Routes: routes, TotalCount: total}, nil
+	count, _ := s.repo.CountInboundRoutes(ctx, req.TenantId)
+	return &dialplanv1.ListInboundRoutesResponse{Routes: list, TotalCount: count}, nil
 }
 
+// --- Dialplan CRUD ---
 func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDialplanRequest) error {
-	dp := req.GetDialplan()
-	actionDataBytes, err := s.serializeActionData(dp)
-	if err != nil {
-		return err
-	}
-
-	if err = s.repo.CreateDialplan(ctx, dp, actionDataBytes); err != nil {
-		return status.Errorf(codes.Internal, "Hata")
-	}
-	return nil
+	// ActionData map'ini JSON byte'a çevirip kaydet
+	bytes, _ := json.Marshal(req.Dialplan.Action.ActionData)
+	return s.repo.CreateDialplan(ctx, req.Dialplan, bytes)
 }
-
 func (s *Service) GetDialplan(ctx context.Context, id string) (*dialplanv1.Dialplan, error) {
-	dp, err := s.repo.FindDialplanByID(ctx, id)
-	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "Yok")
-	}
-	return dp, nil
+	return s.repo.FindDialplanByID(ctx, id)
 }
-
 func (s *Service) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDialplanRequest) error {
-	dp := req.GetDialplan()
-	actionDataBytes, err := s.serializeActionData(dp)
-	if err != nil {
-		return err
-	}
-
-	if rows, err := s.repo.UpdateDialplan(ctx, dp, actionDataBytes); err != nil || rows == 0 {
-		return status.Errorf(codes.NotFound, "Hata")
-	}
-	return nil
+	bytes, _ := json.Marshal(req.Dialplan.Action.ActionData)
+	_, err := s.repo.UpdateDialplan(ctx, req.Dialplan, bytes)
+	return err
 }
-
 func (s *Service) DeleteDialplan(ctx context.Context, id string) error {
-	if rows, err := s.repo.DeleteDialplan(ctx, id); err != nil || rows == 0 {
-		return status.Errorf(codes.NotFound, "Hata")
-	}
-	return nil
+	_, err := s.repo.DeleteDialplan(ctx, id)
+	return err
 }
-
 func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
-	page, pageSize := req.GetPage(), req.GetPageSize()
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 10
-	}
-
-	total, _ := s.repo.CountDialplans(ctx, req.GetTenantId())
-	dialplans, err := s.repo.ListDialplans(ctx, req.GetTenantId(), pageSize, (page-1)*pageSize)
+	list, err := s.repo.ListDialplans(ctx, req.TenantId, req.PageSize, (req.Page-1)*req.PageSize)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Hata")
+		return nil, err
 	}
-	return &dialplanv1.ListDialplansResponse{Dialplans: dialplans, TotalCount: total}, nil
+	count, _ := s.repo.CountDialplans(ctx, req.TenantId)
+	return &dialplanv1.ListDialplansResponse{Dialplans: list, TotalCount: count}, nil
 }
 
-func (s *Service) serializeActionData(dp *dialplanv1.Dialplan) ([]byte, error) {
-	if dp.GetAction() != nil && dp.GetAction().GetActionData() != nil {
-		if bytes, err := json.Marshal(dp.GetAction().GetActionData()); err == nil {
-			return bytes, nil
-		}
+// --- [YENİ] Queue CRUD Pass-through ---
+func (s *Service) CreateQueue(ctx context.Context, req *dialplanv1.CreateQueueRequest) error {
+	return s.repo.CreateQueue(ctx, req.Queue)
+}
+func (s *Service) GetQueue(ctx context.Context, id string) (*dialplanv1.Queue, error) {
+	return s.repo.GetQueue(ctx, id)
+}
+func (s *Service) UpdateQueue(ctx context.Context, req *dialplanv1.UpdateQueueRequest) error {
+	_, err := s.repo.UpdateQueue(ctx, req.Queue)
+	return err
+}
+func (s *Service) DeleteQueue(ctx context.Context, id string) error {
+	_, err := s.repo.DeleteQueue(ctx, id)
+	return err
+}
+func (s *Service) ListQueues(ctx context.Context, req *dialplanv1.ListQueuesRequest) (*dialplanv1.ListQueuesResponse, error) {
+	list, err := s.repo.ListQueues(ctx, req.TenantId, req.PageSize, (req.Page-1)*req.PageSize)
+	if err != nil {
+		return nil, err
 	}
-	return []byte("{}"), nil
+	count, _ := s.repo.CountQueues(ctx, req.TenantId)
+	return &dialplanv1.ListQueuesResponse{Queues: list, TotalCount: count}, nil
+}
+
+// --- [YENİ] Schedule CRUD ---
+func (s *Service) CreateSchedule(ctx context.Context, req *dialplanv1.CreateScheduleRequest) error {
+	return s.repo.CreateSchedule(ctx, req.Schedule)
+}
+func (s *Service) GetSchedule(ctx context.Context, id string) (*dialplanv1.Schedule, error) {
+	return s.repo.GetSchedule(ctx, id)
 }

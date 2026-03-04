@@ -6,15 +6,15 @@ require (
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/joho/godotenv v1.5.1
 	github.com/rs/zerolog v1.34.0
-	// GÜNCELLEME: Platform geneli tutarlılık için v1.13.5 sürümüne yükseltildi.
-	github.com/sentiric/sentiric-contracts v1.15.0
+	// GÜNCELLEME: Yeni veritabanı şeması (Queue, Schedule) ile uyumlu v1.18.0 sürümü
+	github.com/sentiric/sentiric-contracts v1.18.0
 	google.golang.org/grpc v1.75.1
 )
 
-// Redis eklendi (User Cache için)
-require github.com/redis/go-redis/v9 v9.17.3
-
-require github.com/prometheus/client_golang v1.23.2
+require (
+	github.com/prometheus/client_golang v1.23.2
+	github.com/redis/go-redis/v9 v9.17.3
+)
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
