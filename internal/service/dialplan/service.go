@@ -153,8 +153,8 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
+
 			// [CRITICAL FIX]: AUTO-PROVISIONING (Gölge Kayıt)
-			// Kullanıcı bulunamadı. Hemen yeni bir kayıt açıyoruz.
 			l.Info().
 				Str("event", "AUTO_PROVISIONING_STARTED").
 				Str("phone", cleanCaller).
@@ -164,8 +164,8 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			createFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.CreateUserResponse, error) {
 				return s.userClient.CreateUser(c, &userv1.CreateUserRequest{
 					TenantId: route.TenantId,
-					UserType: "caller",
-					Name:     toPtr("Misafir Arayan"),
+					UserType: "guest",                       // [DÜZELTME]: 'caller' yerine 'guest' atanıyor
+					Name:     toPtr("Guest_" + cleanCaller), // [DÜZELTME]: İzlenebilir isim
 					InitialContact: &userv1.CreateUserRequest_InitialContact{
 						ContactType:  "phone",
 						ContactValue: cleanCaller,
