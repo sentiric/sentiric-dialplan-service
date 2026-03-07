@@ -153,8 +153,52 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-			// Hata değil, sadece bilinmeyen numara
-			l.Debug().Err(err).Msg("Kullanıcı tanınamadı (Bilinmeyen Numara)")
+			// [CRITICAL FIX]: AUTO-PROVISIONING (Gölge Kayıt)
+			// Kullanıcı bulunamadı. Hemen yeni bir kayıt açıyoruz.
+			l.Info().
+				Str("event", "AUTO_PROVISIONING_STARTED").
+				Str("phone", cleanCaller).
+				Str("tenant", route.TenantId).
+				Msg("👤 Kayıtlı olmayan numara tespit edildi. Sistemde otomatik (Gölge) profili oluşturuluyor...")
+
+			createFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.CreateUserResponse, error) {
+				return s.userClient.CreateUser(c, &userv1.CreateUserRequest{
+					TenantId: route.TenantId,
+					UserType: "caller",
+					Name:     toPtr("Misafir Arayan"),
+					InitialContact: &userv1.CreateUserRequest_InitialContact{
+						ContactType:  "phone",
+						ContactValue: cleanCaller,
+					},
+					PreferredLanguageCode: toPtr(route.DefaultLanguageCode),
+				}, opts...)
+			}
+
+			createRes, createErr := grpchelper.CallWithTimeout(userReqCtx, createFunc)
+
+			if createErr == nil && createRes.GetUser() != nil {
+				matchedUser = createRes.GetUser()
+				l.Info().Str("user_id", matchedUser.Id).Msg("✅ Otomatik profil başarıyla oluşturuldu.")
+
+				for _, contact := range matchedUser.Contacts {
+					if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
+						matchedContact = contact
+						break
+					}
+				}
+				if s.userCache != nil {
+					_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
+				}
+			} else {
+				// Son çare fallback (Eğer User DB çökerse vs.)
+				l.Error().Err(createErr).Msg("❌ Misafir kullanıcı DB'ye yazılamadı! Ghost profille devam ediliyor.")
+				matchedUser = &userv1.User{
+					Id:       NilUUID,
+					Name:     toPtr("Ghost Misafir"),
+					TenantId: route.TenantId,
+					UserType: "caller",
+				}
+			}
 		}
 	} else {
 		// Cache'den geldiyse contact'ı bul
@@ -167,16 +211,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	}
 
 	if activePlan != nil {
-		if matchedUser == nil {
-			// Bilinmeyen kullanıcı için 'Misafir' objesi oluştur
-			matchedUser = &userv1.User{
-				Id:       NilUUID,
-				Name:     toPtr("Misafir Kullanıcı"),
-				TenantId: route.TenantId,
-				UserType: "caller",
-			}
-		}
-
 		l.Info().
 			Str("event", logger.EventDialplanResolveDone).
 			Str("dialplan.id", activePlan.Id).
