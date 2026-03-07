@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ... Sabitler ...
 const (
 	DialplanSystemFailsafe     = "DP_SYSTEM_FAILSAFE"
 	DialplanSystemWelcomeGuest = "DP_SYSTEM_AI_GUEST"
@@ -38,12 +37,10 @@ func NewService(repo Repository, userClient userv1.UserServiceClient, userCache 
 	return &Service{repo: repo, userClient: userClient, userCache: userCache, baseLog: log}
 }
 
-// ResolveDialplan: Gelen çağrının nereye gideceğine karar verir.
 func (s *Service) ResolveDialplan(ctx context.Context, caller, destination string) (*dialplanv1.ResolveDialplanResponse, error) {
 	l := logger.ContextLogger(ctx, s.baseLog)
 	traceID := logger.ExtractTraceIDFromContext(ctx)
 
-	// Telefon numaralarını temizle (Standardize et)
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
@@ -54,7 +51,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			Str("sip.destination", cleanDestination)).
 		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
-	// 1. Inbound Route Sorgula
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -64,7 +60,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 					Str("sip.destination", cleanDestination)).
 				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
 
-			// Route yoksa "System" tenant'ından genel bir karşılama dön
 			guestRoute := &dialplanv1.InboundRoute{
 				PhoneNumber:         cleanDestination,
 				TenantId:            "system",
@@ -72,30 +67,25 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}
 			return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
-		// DB hatası
 		l.Error().Err(err).Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
-	// 2. [GÜVENLİK] Anonim Çağrı Engelleme
 	if route.BlockAnonymous && (cleanCaller == "" || cleanCaller == "anonymous") {
 		l.Warn().Str("event", "ANONYMOUS_BLOCKED").Msg("🚫 Gizli numara engellendi.")
 		return nil, status.Errorf(codes.PermissionDenied, "Anonymous calls blocked")
 	}
 
-	// 3. [KONTROL] Bakım Modu
 	if route.IsMaintenanceMode {
 		l.Warn().Str("event", logger.EventMaintenanceMode).Msg("🔧 Hat bakım modunda.")
 		return s.buildFailsafeResponse(ctx, l, safeString(route.FailsafeDialplanId), nil, nil, route)
 	}
 
-	// 4. [MANTIK] Zamanlama / Mesai Kontrolü (Scheduler)
 	targetDialplanID := route.ActiveDialplanId
 
 	if route.ScheduleId != nil && *route.ScheduleId != "" {
 		schedule, err := s.repo.GetSchedule(ctx, *route.ScheduleId)
 		if err == nil {
-			// ScheduleEvaluator modülünü kullan
 			isOpen := IsWorkingHour(schedule.ScheduleJson)
 
 			if !isOpen {
@@ -111,7 +101,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// 5. Aktif Dialplan'ı Çek
 	var activePlan *dialplanv1.Dialplan
 	if targetDialplanID != nil {
 		if p, err := s.repo.FindDialplanByID(ctx, *targetDialplanID); err == nil {
@@ -119,17 +108,14 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		}
 	}
 
-	// 6. Arayan Kim? (User Service)
 	userReqCtx := metadata.AppendToOutgoingContext(ctx, "x-trace-id", traceID)
 	var matchedUser *userv1.User
 	var matchedContact *userv1.Contact
 
-	// Cache'e bak
 	if s.userCache != nil {
 		matchedUser, _ = s.userCache.GetUser(ctx, cleanCaller, l)
 	}
 
-	// Cache'de yoksa servise sor
 	if matchedUser == nil {
 		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, User Service sorgulanıyor")
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
@@ -141,20 +127,16 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		userRes, err := grpchelper.CallWithTimeout(userReqCtx, findUserFunc)
 		if err == nil && userRes.GetUser() != nil {
 			matchedUser = userRes.GetUser()
-			// Contact eşleştirme
 			for _, contact := range matchedUser.Contacts {
 				if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
 					matchedContact = contact
 					break
 				}
 			}
-			// Cache güncelle
 			if s.userCache != nil {
 				_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 			}
 		} else {
-
-			// [CRITICAL FIX]: AUTO-PROVISIONING (Gölge Kayıt)
 			l.Info().
 				Str("event", "AUTO_PROVISIONING_STARTED").
 				Str("phone", cleanCaller).
@@ -164,8 +146,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			createFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.CreateUserResponse, error) {
 				return s.userClient.CreateUser(c, &userv1.CreateUserRequest{
 					TenantId: route.TenantId,
-					UserType: "guest",                       // [DÜZELTME]: 'caller' yerine 'guest' atanıyor
-					Name:     toPtr("Guest_" + cleanCaller), // [DÜZELTME]: İzlenebilir isim
+					// [CRITICAL FIX]: UserType "caller" değil "guest" olarak atanıyor. CRM hijyeni sağlar.
+					UserType: "guest",
+					// [CRITICAL FIX]: İsim telefon numarasını içeriyor. Sonradan birleştirmeyi kolaylaştırır.
+					Name: toPtr("Guest_" + cleanCaller),
 					InitialContact: &userv1.CreateUserRequest_InitialContact{
 						ContactType:  "phone",
 						ContactValue: cleanCaller,
@@ -190,18 +174,16 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 					_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 				}
 			} else {
-				// Son çare fallback (Eğer User DB çökerse vs.)
 				l.Error().Err(createErr).Msg("❌ Misafir kullanıcı DB'ye yazılamadı! Ghost profille devam ediliyor.")
 				matchedUser = &userv1.User{
 					Id:       NilUUID,
 					Name:     toPtr("Ghost Misafir"),
 					TenantId: route.TenantId,
-					UserType: "caller",
+					UserType: "guest",
 				}
 			}
 		}
 	} else {
-		// Cache'den geldiyse contact'ı bul
 		for _, contact := range matchedUser.Contacts {
 			if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
 				matchedContact = contact
@@ -245,7 +227,6 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	}, nil
 }
 
-// ... CRUD metodları aynı kalır ...
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	return s.repo.CreateInboundRoute(ctx, route)
