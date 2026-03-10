@@ -61,7 +61,7 @@ func (a *App) Run() {
 	handler := grpchandler.NewHandler(dialplanSvc, a.Log)
 
 	// 3. gRPC Sunucusu
-	grpcServer, err := platformServer.NewServer(*a.Cfg)
+	grpcServer, err := platformServer.NewServer(*a.Cfg, a.Log) // a.Log eklendi
 	if err != nil {
 		a.Log.Fatal().Err(err).Msg("gRPC sunucusu oluşturulamadı")
 	}
