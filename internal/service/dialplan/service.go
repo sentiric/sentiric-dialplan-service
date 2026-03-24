@@ -1,4 +1,4 @@
-// sentiric-dialplan-service/internal/service/dialplan/service.go
+// Dosya: sentiric-dialplan-service/internal/service/dialplan/service.go
 package dialplan
 
 import (
@@ -44,10 +44,17 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
+	// [ARCH-COMPLIANCE] Dinamik Kontak Tipi Belirleme (Extension vs Phone)
+	contactType := "phone"
+	if len(cleanCaller) <= 5 && cleanCaller != "anonymous" {
+		contactType = "extension"
+	}
+
 	l.Info().
 		Str("event", logger.EventDialplanResolveStart).
 		Dict("attributes", zerolog.Dict().
 			Str("sip.caller", cleanCaller).
+			Str("contact_type", contactType).
 			Str("sip.destination", cleanDestination)).
 		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
@@ -120,7 +127,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, User Service sorgulanıyor")
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
-				ContactType:  "phone",
+				ContactType:  contactType, // [DÜZELTME] Dinamik tip gönderiliyor
 				ContactValue: cleanCaller,
 			}, opts...)
 		}
@@ -146,12 +153,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			createFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.CreateUserResponse, error) {
 				return s.userClient.CreateUser(c, &userv1.CreateUserRequest{
 					TenantId: route.TenantId,
-					// [CRITICAL FIX]: UserType "caller" değil "guest" olarak atanıyor. CRM hijyeni sağlar.
 					UserType: "guest",
-					// [CRITICAL FIX]: İsim telefon numarasını içeriyor. Sonradan birleştirmeyi kolaylaştırır.
-					Name: toPtr("Guest_" + cleanCaller),
+					Name:     toPtr("Guest_" + cleanCaller),
 					InitialContact: &userv1.CreateUserRequest_InitialContact{
-						ContactType:  "phone",
+						ContactType:  contactType, // [DÜZELTME] Dinamik tip kaydediliyor
 						ContactValue: cleanCaller,
 					},
 					PreferredLanguageCode: toPtr(route.DefaultLanguageCode),

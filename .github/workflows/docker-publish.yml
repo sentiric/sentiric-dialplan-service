@@ -1,6 +1,4 @@
-# =================================================================
-#    SENTIRIC PLATFORM - STANDART CI/CD DOCKER YAYINLAMA (v3.3 - Observable Build)
-# =================================================================
+# Dosya: sentiric-dialplan-service/.github/workflows/docker-publish.yml
 name: Docker Image CI
 
 on:
@@ -20,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
-          fetch-depth: 0 # Git geçmişini tam çekerek commit hash'ini alabilmek için
+          fetch-depth: 0 
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,15 +36,13 @@ jobs:
           REPO_NAME="${{ github.repository }}"
           echo "SERVICE_NAME=${REPO_NAME#*/}" >> $GITHUB_ENV
 
-      # YENİ: Build argümanlarını hazırla
       - name: Prepare Build Arguments
         id: prep
         run: |
           echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
           echo "GIT_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-          # Go mod dosyasından versiyonu okumak daha karmaşık olduğu için şimdilik commit'e odaklanalım
-          # Veya buraya statik bir versiyon numarası da ekleyebilirsiniz.
-          echo "SERVICE_VERSION=1.0.0" >> $GITHUB_ENV
+          # [VERSION BUMP]: 1.0.0 -> 1.0.1 (Dynamic Contact Type Resolution)
+          echo "SERVICE_VERSION=1.0.1" >> $GITHUB_ENV
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -54,7 +50,6 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:latest, ghcr.io/${{ github.repository }}:${{ env.SERVICE_VERSION }}-${{ env.GIT_COMMIT }}
-          # build-args ile Dockerfile'a yeni bilgileri gönder
           build-args: |
             SERVICE_NAME=${{ env.SERVICE_NAME }}
             BUILD_DATE=${{ env.BUILD_DATE }}
