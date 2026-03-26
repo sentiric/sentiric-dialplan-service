@@ -1,3 +1,4 @@
+// sentiric-dialplan-service/internal/service/dialplan/chedule_evaluator.go
 package dialplan
 
 import (
@@ -5,14 +6,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
+	"github.com/rs/zerolog"
+	"github.com/sentiric/sentiric-dialplan-service/internal/logger"
 )
 
 // ScheduleDefinition, veritabanındaki JSONB yapısını karşılar.
 type ScheduleDefinition struct {
 	Timezone string                 `json:"timezone"`
 	Days     map[string][]TimeRange `json:"days"`     // "mon": [{"start": "09:00", "end": "18:00"}]
-	Holidays []string               `json:"holidays"` // ["2026-01-01"]
+	Holidays []string               `json:"holidays"` //["2026-01-01"]
 }
 
 type TimeRange struct {
@@ -21,21 +23,22 @@ type TimeRange struct {
 }
 
 // IsWorkingHour: Verilen zamanın çalışma saatleri içinde olup olmadığını kontrol eder.
-func IsWorkingHour(scheduleJson string) bool {
+// [ARCH-COMPLIANCE]: Trace ID barındıran Context Logger parametre olarak geçirildi.
+func IsWorkingHour(scheduleJson string, l zerolog.Logger) bool {
 	if scheduleJson == "" {
 		return true // Takvim yoksa her zaman açık varsay
 	}
 
 	var sched ScheduleDefinition
 	if err := json.Unmarshal([]byte(scheduleJson), &sched); err != nil {
-		log.Error().Err(err).Msg("Schedule JSON parse hatası, varsayılan: AÇIK")
+		l.Error().Err(err).Str("event", logger.EventScheduleParseError).Msg("Schedule JSON parse hatası, varsayılan: AÇIK")
 		return true
 	}
 
 	// 1. Timezone Ayarla
 	loc, err := time.LoadLocation(sched.Timezone)
 	if err != nil {
-		log.Warn().Str("tz", sched.Timezone).Msg("Geçersiz Timezone, UTC kullanılıyor.")
+		l.Warn().Str("event", logger.EventScheduleParseError).Str("tz", sched.Timezone).Msg("Geçersiz Timezone, UTC kullanılıyor.")
 		loc = time.UTC
 	}
 

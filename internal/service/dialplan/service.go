@@ -44,7 +44,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
-	// [ARCH-COMPLIANCE] Dinamik Kontak Tipi Belirleme (Extension vs Phone)
+	//[ARCH-COMPLIANCE] Dinamik Kontak Tipi Belirleme (Extension vs Phone)
 	contactType := "phone"
 	if len(cleanCaller) <= 5 && cleanCaller != "anonymous" {
 		contactType = "extension"
@@ -74,12 +74,15 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}
 			return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
-		l.Error().Err(err).Msg("Route sorgusu başarısız")
+
+		l.Error().Err(err).
+			Str("event", logger.EventRouteQueryFailed).
+			Msg("Route sorgusu başarısız")
 		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
 	}
 
 	if route.BlockAnonymous && (cleanCaller == "" || cleanCaller == "anonymous") {
-		l.Warn().Str("event", "ANONYMOUS_BLOCKED").Msg("🚫 Gizli numara engellendi.")
+		l.Warn().Str("event", logger.EventAnonymousBlocked).Msg("🚫 Gizli numara engellendi.")
 		return nil, status.Errorf(codes.PermissionDenied, "Anonymous calls blocked")
 	}
 
@@ -93,18 +96,28 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	if route.ScheduleId != nil && *route.ScheduleId != "" {
 		schedule, err := s.repo.GetSchedule(ctx, *route.ScheduleId)
 		if err == nil {
-			isOpen := IsWorkingHour(schedule.ScheduleJson)
+			//[ARCH-COMPLIANCE] Context Logger geçirildi
+			isOpen := IsWorkingHour(schedule.ScheduleJson, l)
 
 			if !isOpen {
-				l.Info().Str("schedule", schedule.Name).Msg("🌙 Mesai dışı (Off-Hours) kuralı devrede.")
+				l.Info().
+					Str("event", logger.EventOffHoursActive).
+					Str("schedule", schedule.Name).
+					Msg("🌙 Mesai dışı (Off-Hours) kuralı devrede.")
 				if route.OffHoursDialplanId != nil && *route.OffHoursDialplanId != "" {
 					targetDialplanID = route.OffHoursDialplanId
 				}
 			} else {
-				l.Debug().Str("schedule", schedule.Name).Msg("☀️ Mesai içi (Working-Hours) kuralı devrede.")
+				l.Debug().
+					Str("event", logger.EventWorkingHoursActive).
+					Str("schedule", schedule.Name).
+					Msg("☀️ Mesai içi (Working-Hours) kuralı devrede.")
 			}
 		} else {
-			l.Warn().Err(err).Str("schedule_id", *route.ScheduleId).Msg("Zamanlama planı yüklenemedi, varsayılan akışa devam ediliyor.")
+			l.Warn().Err(err).
+				Str("event", logger.EventScheduleLoadFailed).
+				Str("schedule_id", *route.ScheduleId).
+				Msg("Zamanlama planı yüklenemedi, varsayılan akışa devam ediliyor.")
 		}
 	}
 
@@ -127,7 +140,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 		l.Debug().Str("event", logger.EventUserCacheMiss).Msg("Cache miss, User Service sorgulanıyor")
 		findUserFunc := func(c context.Context, opts ...grpc.CallOption) (*userv1.FindUserByContactResponse, error) {
 			return s.userClient.FindUserByContact(c, &userv1.FindUserByContactRequest{
-				ContactType:  contactType, // [DÜZELTME] Dinamik tip gönderiliyor
+				ContactType:  contactType,
 				ContactValue: cleanCaller,
 			}, opts...)
 		}
@@ -145,7 +158,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			}
 		} else {
 			l.Info().
-				Str("event", "AUTO_PROVISIONING_STARTED").
+				Str("event", logger.EventAutoProvisionStart).
 				Str("phone", cleanCaller).
 				Str("tenant", route.TenantId).
 				Msg("👤 Kayıtlı olmayan numara tespit edildi. Sistemde otomatik (Gölge) profili oluşturuluyor...")
@@ -156,7 +169,7 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 					UserType: "guest",
 					Name:     toPtr("Guest_" + cleanCaller),
 					InitialContact: &userv1.CreateUserRequest_InitialContact{
-						ContactType:  contactType, // [DÜZELTME] Dinamik tip kaydediliyor
+						ContactType:  contactType,
 						ContactValue: cleanCaller,
 					},
 					PreferredLanguageCode: toPtr(route.DefaultLanguageCode),
@@ -167,7 +180,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 
 			if createErr == nil && createRes.GetUser() != nil {
 				matchedUser = createRes.GetUser()
-				l.Info().Str("user_id", matchedUser.Id).Msg("✅ Otomatik profil başarıyla oluşturuldu.")
+				l.Info().
+					Str("event", logger.EventAutoProvisionSuccess).
+					Str("user_id", matchedUser.Id).
+					Msg("✅ Otomatik profil başarıyla oluşturuldu.")
 
 				for _, contact := range matchedUser.Contacts {
 					if normalizePhoneNumber(contact.ContactValue) == cleanCaller {
@@ -179,7 +195,10 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 					_ = s.userCache.SetUser(ctx, cleanCaller, matchedUser, l)
 				}
 			} else {
-				l.Error().Err(createErr).Msg("❌ Misafir kullanıcı DB'ye yazılamadı! Ghost profille devam ediliyor.")
+				l.Error().Err(createErr).
+					Str("event", logger.EventAutoProvisionFail).
+					Msg("❌ Misafir kullanıcı DB'ye yazılamadı! Ghost profille devam ediliyor.")
+
 				matchedUser = &userv1.User{
 					Id:       NilUUID,
 					Name:     toPtr("Ghost Misafir"),
@@ -223,7 +242,7 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	}
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
-		l.Error().Msg("❌ CRITICAL: Failsafe plan DB'de yok!")
+		l.Error().Str("event", logger.EventFailsafeMissing).Msg("❌ CRITICAL: Failsafe plan DB'de yok!")
 		return nil, status.Errorf(codes.Internal, "System Error: Failsafe plan missing")
 	}
 	return &dialplanv1.ResolveDialplanResponse{

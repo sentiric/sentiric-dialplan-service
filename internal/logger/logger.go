@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -75,7 +76,6 @@ func New(serviceName, version, env, hostname, logLevel, logFormat string) zerolo
 			Out:        os.Stderr,
 			TimeFormat: time.RFC3339,
 		}
-		// Dev modunda bile temel alanları görelim
 		logger = zerolog.New(output).
 			With().
 			Timestamp().
@@ -86,11 +86,10 @@ func New(serviceName, version, env, hostname, logLevel, logFormat string) zerolo
 	return logger.Level(level)
 }
 
-// ExtractTraceIDFromContext: gRPC Metadata'dan trace_id çeker.
-// Servis katmanında Context Propagation için Public yapıldı.
+// ExtractTraceIDFromContext: gRPC Metadata veya OpenTelemetry'den trace_id çeker.
 func ExtractTraceIDFromContext(ctx context.Context) string {
+	// Önce gRPC Metadata'dan dene
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		// İstek başlıklarında "x-trace-id" veya "trace-id" ara
 		if vals := md.Get("x-trace-id"); len(vals) > 0 && vals[0] != "" {
 			return vals[0]
 		}
@@ -98,14 +97,30 @@ func ExtractTraceIDFromContext(ctx context.Context) string {
 			return vals[0]
 		}
 	}
+
+	// OpenTelemetry'den dene (SUTS Mandatory Fallback)
+	spanContext := trace.SpanContextFromContext(ctx)
+	if spanContext.HasTraceID() {
+		return spanContext.TraceID().String()
+	}
+
 	return "unknown"
 }
 
-// ContextLogger: Trace ID ile zenginleştirilmiş logger döndürür.
+// ContextLogger: Trace ID ve Span ID ile zenginleştirilmiş logger döndürür.
+// [ARCH-COMPLIANCE]: Span ID entegrasyonu SUTS v4.0 kuralına istinaden yapıldı.
 func ContextLogger(ctx context.Context, baseLog zerolog.Logger) zerolog.Logger {
+	logContext := baseLog.With()
+
 	traceID := ExtractTraceIDFromContext(ctx)
 	if traceID != "unknown" {
-		return baseLog.With().Str("trace_id", traceID).Logger()
+		logContext = logContext.Str("trace_id", traceID)
 	}
-	return baseLog
+
+	spanContext := trace.SpanContextFromContext(ctx)
+	if spanContext.HasSpanID() {
+		logContext = logContext.Str("span_id", spanContext.SpanID().String())
+	}
+
+	return logContext.Logger()
 }

@@ -20,27 +20,24 @@ import (
 func LoggingInterceptor(log zerolog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		start := time.Now()
-		traceID := logger.ExtractTraceIDFromContext(ctx)
 
-		l := log.With().
-			Str("trace_id", traceID).
+		// [ARCH-COMPLIANCE]: SUTS v4.0 span ve trace id context logger
+		l := logger.ContextLogger(ctx, log).With().
 			Str("grpc.method", info.FullMethod).
 			Logger()
-
-		// l.Info().Str("event", "GRPC_IN_START").Msg("📥 gRPC isteği alındı") // Gürültüyü azaltmak için Start logunu kaldırdık
 
 		resp, err := handler(ctx, req)
 		duration := time.Since(start).Milliseconds()
 
 		if err != nil {
 			l.Error().
-				Str("event", "GRPC_IN_FAIL").
+				Str("event", logger.EventGrpcInFail).
 				Int64("latency_ms", duration).
 				Err(err).
 				Msg("❌ gRPC isteği hatayla sonuçlandı")
 		} else {
 			l.Info().
-				Str("event", "GRPC_IN_SUCCESS").
+				Str("event", logger.EventGrpcInSuccess).
 				Int64("latency_ms", duration).
 				Msg("✅ gRPC isteği başarıyla yanıtlandı")
 		}
