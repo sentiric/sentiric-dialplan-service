@@ -51,6 +51,7 @@ func NewHandler(svc Service, log zerolog.Logger) *Handler {
 func (h *Handler) ResolveDialplan(ctx context.Context, req *dialplanv1.ResolveDialplanRequest) (*dialplanv1.ResolveDialplanResponse, error) {
 	return h.svc.ResolveDialplan(ctx, req.GetCallerContactValue(), req.GetDestinationNumber())
 }
+
 func (h *Handler) CreateInboundRoute(ctx context.Context, req *dialplanv1.CreateInboundRouteRequest) (*dialplanv1.CreateInboundRouteResponse, error) {
 	if err := h.svc.CreateInboundRoute(ctx, req.GetRoute()); err != nil {
 		return nil, err
@@ -68,6 +69,7 @@ func (h *Handler) CreateQueue(ctx context.Context, req *dialplanv1.CreateQueueRe
 	}
 	return &dialplanv1.CreateQueueResponse{Queue: req.GetQueue()}, nil
 }
+
 func (h *Handler) GetQueue(ctx context.Context, req *dialplanv1.GetQueueRequest) (*dialplanv1.GetQueueResponse, error) {
 	q, err := h.svc.GetQueue(ctx, req.GetId())
 	if err != nil {
@@ -75,18 +77,21 @@ func (h *Handler) GetQueue(ctx context.Context, req *dialplanv1.GetQueueRequest)
 	}
 	return &dialplanv1.GetQueueResponse{Queue: q}, nil
 }
+
 func (h *Handler) UpdateQueue(ctx context.Context, req *dialplanv1.UpdateQueueRequest) (*dialplanv1.UpdateQueueResponse, error) {
 	if err := h.svc.UpdateQueue(ctx, req); err != nil {
 		return nil, err
 	}
 	return &dialplanv1.UpdateQueueResponse{Queue: req.GetQueue()}, nil
 }
+
 func (h *Handler) DeleteQueue(ctx context.Context, req *dialplanv1.DeleteQueueRequest) (*dialplanv1.DeleteQueueResponse, error) {
 	if err := h.svc.DeleteQueue(ctx, req.GetId()); err != nil {
 		return nil, err
 	}
 	return &dialplanv1.DeleteQueueResponse{Success: true}, nil
 }
+
 func (h *Handler) ListQueues(ctx context.Context, req *dialplanv1.ListQueuesRequest) (*dialplanv1.ListQueuesResponse, error) {
 	return h.svc.ListQueues(ctx, req)
 }
@@ -98,6 +103,7 @@ func (h *Handler) CreateSchedule(ctx context.Context, req *dialplanv1.CreateSche
 	}
 	return &dialplanv1.CreateScheduleResponse{Schedule: req.GetSchedule()}, nil
 }
+
 func (h *Handler) GetSchedule(ctx context.Context, req *dialplanv1.GetScheduleRequest) (*dialplanv1.GetScheduleResponse, error) {
 	s, err := h.svc.GetSchedule(ctx, req.GetId())
 	if err != nil {

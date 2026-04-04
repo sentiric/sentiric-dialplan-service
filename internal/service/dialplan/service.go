@@ -255,18 +255,22 @@ func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.Inbo
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	return s.repo.CreateInboundRoute(ctx, route)
 }
+
 func (s *Service) GetInboundRoute(ctx context.Context, phoneNumber string) (*dialplanv1.InboundRoute, error) {
 	return s.repo.FindInboundRouteByPhone(ctx, normalizePhoneNumber(phoneNumber))
 }
+
 func (s *Service) UpdateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)
 	_, err := s.repo.UpdateInboundRoute(ctx, route)
 	return err
 }
+
 func (s *Service) DeleteInboundRoute(ctx context.Context, phoneNumber string) error {
 	_, err := s.repo.DeleteInboundRoute(ctx, normalizePhoneNumber(phoneNumber))
 	return err
 }
+
 func (s *Service) ListInboundRoutes(ctx context.Context, req *dialplanv1.ListInboundRoutesRequest) (*dialplanv1.ListInboundRoutesResponse, error) {
 	list, err := s.repo.ListInboundRoutes(ctx, req.TenantId, req.PageSize, (req.Page-1)*req.PageSize)
 	if err != nil {
@@ -280,18 +284,22 @@ func (s *Service) CreateDialplan(ctx context.Context, req *dialplanv1.CreateDial
 	bytes, _ := json.Marshal(req.Dialplan.Action.ActionData)
 	return s.repo.CreateDialplan(ctx, req.Dialplan, bytes)
 }
+
 func (s *Service) GetDialplan(ctx context.Context, id string) (*dialplanv1.Dialplan, error) {
 	return s.repo.FindDialplanByID(ctx, id)
 }
+
 func (s *Service) UpdateDialplan(ctx context.Context, req *dialplanv1.UpdateDialplanRequest) error {
 	bytes, _ := json.Marshal(req.Dialplan.Action.ActionData)
 	_, err := s.repo.UpdateDialplan(ctx, req.Dialplan, bytes)
 	return err
 }
+
 func (s *Service) DeleteDialplan(ctx context.Context, id string) error {
 	_, err := s.repo.DeleteDialplan(ctx, id)
 	return err
 }
+
 func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialplansRequest) (*dialplanv1.ListDialplansResponse, error) {
 	list, err := s.repo.ListDialplans(ctx, req.TenantId, req.PageSize, (req.Page-1)*req.PageSize)
 	if err != nil {
@@ -304,17 +312,21 @@ func (s *Service) ListDialplans(ctx context.Context, req *dialplanv1.ListDialpla
 func (s *Service) CreateQueue(ctx context.Context, req *dialplanv1.CreateQueueRequest) error {
 	return s.repo.CreateQueue(ctx, req.Queue)
 }
+
 func (s *Service) GetQueue(ctx context.Context, id string) (*dialplanv1.Queue, error) {
 	return s.repo.GetQueue(ctx, id)
 }
+
 func (s *Service) UpdateQueue(ctx context.Context, req *dialplanv1.UpdateQueueRequest) error {
 	_, err := s.repo.UpdateQueue(ctx, req.Queue)
 	return err
 }
+
 func (s *Service) DeleteQueue(ctx context.Context, id string) error {
 	_, err := s.repo.DeleteQueue(ctx, id)
 	return err
 }
+
 func (s *Service) ListQueues(ctx context.Context, req *dialplanv1.ListQueuesRequest) (*dialplanv1.ListQueuesResponse, error) {
 	list, err := s.repo.ListQueues(ctx, req.TenantId, req.PageSize, (req.Page-1)*req.PageSize)
 	if err != nil {
@@ -327,6 +339,7 @@ func (s *Service) ListQueues(ctx context.Context, req *dialplanv1.ListQueuesRequ
 func (s *Service) CreateSchedule(ctx context.Context, req *dialplanv1.CreateScheduleRequest) error {
 	return s.repo.CreateSchedule(ctx, req.Schedule)
 }
+
 func (s *Service) GetSchedule(ctx context.Context, id string) (*dialplanv1.Schedule, error) {
 	return s.repo.GetSchedule(ctx, id)
 }
