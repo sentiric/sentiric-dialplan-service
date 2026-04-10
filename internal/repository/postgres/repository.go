@@ -228,25 +228,40 @@ func (r *Repository) DeleteDialplan(ctx context.Context, id string) (int64, erro
 func (r *Repository) ListDialplans(ctx context.Context, tenantID string, pageSize, offset int32) ([]*dialplanv1.Dialplan, error) {
 	baseQuery := "SELECT id, tenant_id, description, action, action_data FROM dialplans"
 	args := []interface{}{}
+
 	if tenantID != "" {
 		baseQuery += " WHERE tenant_id = $1"
 		args = append(args, tenantID)
 	}
+
 	dataQuery := baseQuery + fmt.Sprintf(" ORDER BY id ASC LIMIT %d OFFSET %d", pageSize, offset)
+
 	rows, err := r.db.Query(ctx, dataQuery, args...)
 	if err != nil {
 		return nil, r.handleError(err)
 	}
 	defer rows.Close()
+
 	var dialplans []*dialplanv1.Dialplan
+
 	for rows.Next() {
-		// Basitleştirilmiş tarama, sadece ID dönüyor
 		var dp dialplanv1.Dialplan
 		var dummyAction, dummyDesc, dummyTenant sql.NullString
 		var dummyBytes []byte
-		rows.Scan(&dp.Id, &dummyTenant, &dummyDesc, &dummyAction, &dummyBytes)
+
+		// ✅ CRITICAL FIX: error check eklendi
+		if err := rows.Scan(&dp.Id, &dummyTenant, &dummyDesc, &dummyAction, &dummyBytes); err != nil {
+			return nil, r.handleError(err)
+		}
+
 		dialplans = append(dialplans, &dp)
 	}
+
+	// ✅ BONUS FIX: rows iteration error check
+	if err := rows.Err(); err != nil {
+		return nil, r.handleError(err)
+	}
+
 	return dialplans, nil
 }
 

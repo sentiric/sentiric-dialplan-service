@@ -46,10 +46,10 @@ func (c *UserCache) GetUser(ctx context.Context, phoneNumber string, log zerolog
 		return nil, err
 	}
 
-	log.Debug().
-		Str("event", logger.EventUserCacheHit).
-		Dict("attributes", zerolog.Dict().Str("phone", phoneNumber)).
-		Msg("✅ User Cache HIT")
+	log.Debug(). // [ARCH-COMPLIANCE] info -> debug
+			Str("event", logger.EventUserCacheHit).
+			Dict("attributes", zerolog.Dict().Str("phone", phoneNumber)).
+			Msg("✅ User Cache HIT")
 
 	return &user, nil
 }
