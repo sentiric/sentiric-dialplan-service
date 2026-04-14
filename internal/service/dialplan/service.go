@@ -57,27 +57,24 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 			Str("sip.destination", cleanDestination)).
 		Msg("📞 ResolveDialplan İsteği İşleniyor")
 
+	// Adım 1: Gelen numaraya (destination) göre uygun inbound route'u bulalım
+	// [ARCH-COMPLIANCE FIX] Veritabanı hatalarında sistemi ölü bırakmak (500 Error) YASAKTIR. Failsafe akışa yönlendirilecek şekilde hata yönetimi uygulanır.
 	route, err := s.repo.FindInboundRouteByPhone(ctx, cleanDestination)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			l.Warn().
-				Str("event", logger.EventRouteNotFound).
-				Dict("attributes", zerolog.Dict().
-					Str("sip.destination", cleanDestination)).
-				Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
-
+			l.Warn().Str("event", logger.EventRouteNotFound).Msg("🚫 Route bulunamadı. Misafir akışına yönlendiriliyor.")
 			guestRoute := &dialplanv1.InboundRoute{
-				PhoneNumber:         cleanDestination,
-				TenantId:            "system",
-				DefaultLanguageCode: "tr",
+				PhoneNumber: cleanDestination, TenantId: "system", DefaultLanguageCode: "tr",
 			}
 			return s.buildFailsafeResponse(ctx, l, DialplanSystemWelcomeGuest, nil, nil, guestRoute)
 		}
 
-		l.Error().Err(err).
-			Str("event", logger.EventRouteQueryFailed).
-			Msg("Route sorgusu başarısız")
-		return nil, status.Errorf(codes.Internal, "Route sorgusu başarısız: %v", err)
+		// [ARCH-COMPLIANCE FIX] Veritabanı yoksa HATA VERME, FAILSAFE DÖN!
+		l.Error().Err(err).Str("event", logger.EventRouteQueryFailed).Msg("❌ DB Kapalı. Hardcoded Failsafe tetikleniyor.")
+		dummyRoute := &dialplanv1.InboundRoute{
+			PhoneNumber: cleanDestination, TenantId: "system", DefaultLanguageCode: "tr",
+		}
+		return s.buildFailsafeResponse(ctx, l, DialplanSystemFailsafe, nil, nil, dummyRoute)
 	}
 
 	if route.BlockAnonymous && (cleanCaller == "" || cleanCaller == "anonymous") {
