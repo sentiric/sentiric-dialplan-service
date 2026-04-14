@@ -42,18 +42,27 @@ func (a *App) Run() {
 	// 1. Altyapı Bağlantıları
 	dbPool, err := database.NewConnection(a.Cfg.DatabaseURL)
 	if err != nil {
-		a.Log.Fatal().Err(err).Str("event", logger.EventDBConnectionFail).Msg("Veritabanı bağlantısı kurulamadı")
+		// [ARCH-COMPLIANCE FIX] Fatal yerine Error kullanıldı. Konteyner çökmeyecek.
+		a.Log.Error().Err(err).Str("event", logger.EventDBConnectionFail).Msg("Veritabanı ping başarısız, ancak havuz oluşturuldu. Arka planda tekrar denenecek (Ghost Mode).")
+	} else {
+		a.Log.Info().Str("event", "DB_CONNECTION_SUCCESS").Msg("✅ Veritabanı bağlantısı sağlandı.")
 	}
-	defer dbPool.Close()
+
+	if dbPool != nil {
+		defer dbPool.Close()
+	}
 
 	redisClient := a.setupRedis()
 	defer redisClient.Close()
 
 	userClient, userConn, err := client.NewUserServiceClient(a.Cfg.UserServiceURL, *a.Cfg)
 	if err != nil {
-		a.Log.Fatal().Err(err).Str("event", logger.EventUserSvcConnectionFail).Msg("User service istemcisi oluşturulamadı")
+		// User Service kapalıysa da çökmeyeceğiz, sadece hata basacağız (Dialplan kendi koda gömülü failsafe ile çalışabilir)
+		a.Log.Error().Err(err).Str("event", logger.EventUserSvcConnectionFail).Msg("User service istemcisi başlatılamadı. Ghost misafir moduna düşülebilir.")
 	}
-	defer userConn.Close()
+	if userConn != nil {
+		defer userConn.Close()
+	}
 
 	// 2. Bağımlılıkların Oluşturulması (Dependency Injection)
 	repo := postgres.NewRepository(dbPool, a.Log)
@@ -80,7 +89,9 @@ func (a *App) Run() {
 func (a *App) setupRedis() *redis.Client {
 	redisOpts, err := redis.ParseURL(a.Cfg.RedisURL)
 	if err != nil {
-		a.Log.Fatal().Err(err).Str("event", logger.EventRedisConnectionFail).Msg("Geçersiz Redis URL")
+		// Geçersiz URL durumunda çökmek mantıklı olabilir ama Ghost mode için sadece uyarıyoruz.
+		a.Log.Error().Err(err).Str("event", logger.EventRedisConnectionFail).Msg("Geçersiz Redis URL. Önbellek kapalı.")
+		return redis.NewClient(&redis.Options{}) // Boş client dönüyoruz, istekler hata alır ama servis yaşar.
 	}
 	redisClient := redis.NewClient(redisOpts)
 
