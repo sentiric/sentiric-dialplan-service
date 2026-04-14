@@ -21,7 +21,7 @@ import (
 const (
 	DialplanSystemFailsafe     = "DP_SYSTEM_FAILSAFE"
 	DialplanSystemWelcomeGuest = "DP_SYSTEM_AI_GUEST"
-	ActionPlayAnnouncement     = "PLAY_ANNOUNCEMENT"
+	ActionPlayAnnouncement     = "PLAY_STATIC_ANNOUNCEMENT" // [ARCH-COMPLIANCE FIX]
 	AnnouncementSystemError    = "ANNOUNCE_SYSTEM_ERROR"
 	NilUUID                    = "00000000-0000-0000-0000-000000000000"
 )
@@ -44,7 +44,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	cleanDestination := normalizePhoneNumber(extractUserPart(destination))
 	cleanCaller := normalizePhoneNumber(extractUserPart(caller))
 
-	//[ARCH-COMPLIANCE] Dinamik Kontak Tipi Belirleme (Extension vs Phone)
 	contactType := "phone"
 	if len(cleanCaller) <= 5 && cleanCaller != "anonymous" {
 		contactType = "extension"
@@ -96,7 +95,6 @@ func (s *Service) ResolveDialplan(ctx context.Context, caller, destination strin
 	if route.ScheduleId != nil && *route.ScheduleId != "" {
 		schedule, err := s.repo.GetSchedule(ctx, *route.ScheduleId)
 		if err == nil {
-			//[ARCH-COMPLIANCE] Context Logger geçirildi
 			isOpen := IsWorkingHour(schedule.ScheduleJson, l)
 
 			if !isOpen {
@@ -242,14 +240,37 @@ func (s *Service) buildFailsafeResponse(ctx context.Context, l zerolog.Logger, p
 	}
 	plan, err := s.repo.FindDialplanByID(ctx, planID)
 	if err != nil {
-		l.Error().Str("event", logger.EventFailsafeMissing).Msg("❌ CRITICAL: Failsafe plan DB'de yok!")
-		return nil, status.Errorf(codes.Internal, "System Error: Failsafe plan missing")
+		// [ARCH-COMPLIANCE FIX] Veritabanı bozulduğunda veya seeder çalışmadığında
+		// sistemi ölü bırakmak (500 Error) YASAKTIR.
+		// Hardcoded bir acil durum anonsu (Action) üretilerek çağrı güvence altına alınır.
+		l.Error().Str("event", logger.EventFailsafeMissing).Msg("❌ CRITICAL: Failsafe plan DB'de yok! Koda gömülü Hardcoded Failsafe devreye giriyor.")
+
+		hardcodedAction := &dialplanv1.DialplanAction{
+			Action: ActionPlayAnnouncement,
+			Type:   dialplanv1.ActionType_ACTION_TYPE_PLAY_STATIC_ANNOUNCEMENT,
+			ActionData: map[string]string{
+				"announcement_id": AnnouncementSystemError,
+				"record":          "true",
+			},
+		}
+
+		return &dialplanv1.ResolveDialplanResponse{
+			DialplanId:     "HARDCODED_FAILSAFE",
+			TenantId:       "system",
+			Action:         hardcodedAction,
+			MatchedUser:    user,
+			MatchedContact: contact,
+			InboundRoute:   route,
+		}, nil
 	}
+
 	return &dialplanv1.ResolveDialplanResponse{
 		DialplanId: plan.Id, TenantId: plan.TenantId, Action: plan.Action,
 		MatchedUser: user, MatchedContact: contact, InboundRoute: route,
 	}, nil
 }
+
+// CRUD operasyonları
 
 func (s *Service) CreateInboundRoute(ctx context.Context, route *dialplanv1.InboundRoute) error {
 	route.PhoneNumber = normalizePhoneNumber(route.PhoneNumber)

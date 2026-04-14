@@ -37,11 +37,12 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Env:            getEnv("ENV", "production"),
-		LogLevel:       getEnv("LOG_LEVEL", "info"),
-		LogFormat:      getEnv("LOG_FORMAT", "json"),
-		NodeHostname:   getEnv("NODE_HOSTNAME", "localhost"),
-		ServiceVersion: getEnv("SERVICE_VERSION", "1.0.0"),
+		Env:          getEnv("ENV", "production"),
+		LogLevel:     getEnv("LOG_LEVEL", "info"),
+		LogFormat:    getEnv("LOG_FORMAT", "json"),
+		NodeHostname: getEnv("NODE_HOSTNAME", "localhost"),
+		// versionlama bilgisini aynı rust projeleri gibi bir standartda bağlamalıyız!!!!
+		ServiceVersion: getEnv("SERVICE_VERSION", "1.0.4"),
 		DatabaseURL:    getEnvOrFail("POSTGRES_URL"),
 		UserServiceURL: getEnvOrFail("USER_SERVICE_TARGET_GRPC_URL"),
 		RedisURL:       getEnv("REDIS_URL", "redis://redis.service.sentiric.cloud:6379/0"),
