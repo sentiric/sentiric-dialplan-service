@@ -42,8 +42,7 @@ func (a *App) Run() {
 	// 1. Altyapı Bağlantıları
 	dbPool, err := database.NewConnection(a.Cfg.DatabaseURL)
 	if err != nil {
-		// [ARCH-COMPLIANCE FIX] Fatal yerine Error kullanıldı. Konteyner çökmeyecek.
-		a.Log.Error().Err(err).Str("event", logger.EventDBConnectionFail).Msg("Veritabanı ping başarısız, ancak havuz oluşturuldu. Arka planda tekrar denenecek (Ghost Mode).")
+		a.Log.Error().Err(err).Str("event", logger.EventDBConnectionFail).Msg("Veritabanı ping başarısız, havuz arka planda tekrar deneyecek (Ghost Mode).")
 	} else {
 		a.Log.Info().Str("event", "DB_CONNECTION_SUCCESS").Msg("✅ Veritabanı bağlantısı sağlandı.")
 	}
@@ -57,14 +56,13 @@ func (a *App) Run() {
 
 	userClient, userConn, err := client.NewUserServiceClient(a.Cfg.UserServiceURL, *a.Cfg)
 	if err != nil {
-		// User Service kapalıysa da çökmeyeceğiz, sadece hata basacağız (Dialplan kendi koda gömülü failsafe ile çalışabilir)
 		a.Log.Error().Err(err).Str("event", logger.EventUserSvcConnectionFail).Msg("User service istemcisi başlatılamadı. Ghost misafir moduna düşülebilir.")
 	}
 	if userConn != nil {
 		defer userConn.Close()
 	}
 
-	// 2. Bağımlılıkların Oluşturulması (Dependency Injection)
+	// 2. Bağımlılıkların Oluşturulması
 	repo := postgres.NewRepository(dbPool, a.Log)
 	userCache := cache.NewUserCache(redisClient)
 	dialplanSvc := dialplan.NewService(repo, userClient, userCache, a.Log)
@@ -78,7 +76,7 @@ func (a *App) Run() {
 	dialplanv1.RegisterDialplanServiceServer(grpcServer, handler)
 	reflection.Register(grpcServer)
 
-	// 4. Sunucuları Başlat
+	// 4. Sunucuları Başlat (Anında Port Açılır)
 	httpServer := a.startHttpServer()
 	a.startGRPCServer(grpcServer)
 
@@ -89,9 +87,8 @@ func (a *App) Run() {
 func (a *App) setupRedis() *redis.Client {
 	redisOpts, err := redis.ParseURL(a.Cfg.RedisURL)
 	if err != nil {
-		// Geçersiz URL durumunda çökmek mantıklı olabilir ama Ghost mode için sadece uyarıyoruz.
 		a.Log.Error().Err(err).Str("event", logger.EventRedisConnectionFail).Msg("Geçersiz Redis URL. Önbellek kapalı.")
-		return redis.NewClient(&redis.Options{}) // Boş client dönüyoruz, istekler hata alır ama servis yaşar.
+		return redis.NewClient(&redis.Options{})
 	}
 	redisClient := redis.NewClient(redisOpts)
 
@@ -150,13 +147,10 @@ func (a *App) waitForShutdown(grpcSrv *grpc.Server, httpSrv *http.Server) {
 
 	a.Log.Info().Str("event", logger.EventGRPCServerStop).Msg("gRPC sunucusu durduruluyor...")
 	grpcSrv.GracefulStop()
-	a.Log.Info().Str("event", logger.EventGRPCServerStop).Msg("gRPC sunucusu durduruldu.")
 
 	a.Log.Info().Str("event", logger.EventHTTPServerStop).Msg("HTTP sunucusu durduruluyor...")
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		a.Log.Error().Err(err).Str("event", logger.EventHTTPServerFail).Msg("HTTP sunucusu düzgün kapatılamadı.")
-	} else {
-		a.Log.Info().Str("event", logger.EventHTTPServerStop).Msg("HTTP sunucusu durduruldu.")
 	}
 
 	a.Log.Info().Str("event", logger.EventSystemShutdown).Msg("Servis başarıyla durduruldu.")
